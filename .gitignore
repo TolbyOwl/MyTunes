@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Flet build artifacts
+.flet/
+build/
+
+# MyTunes local cache & secrets
+.mytunes_cache/
+.mytunes_tokens.json
+mytunes.db
+*.log
+
+# IDE
+.vscode/
+.idea/
