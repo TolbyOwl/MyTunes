@@ -22,6 +22,11 @@ class QueueManager:
         self.is_shuffled: bool = False
         self.original_queue: List[Track] = []
         self.on_track_changed = on_track_changed
+        self.on_queue_changed: Optional[Callable[[], None]] = None
+
+    def _notify_queue_changed(self) -> None:
+        if self.on_queue_changed:
+            self.on_queue_changed()
 
     @property
     def current_track(self) -> Optional[Track]:
@@ -42,6 +47,7 @@ class QueueManager:
         current = self.current_track
         if self.on_track_changed:
             self.on_track_changed(current)
+        self._notify_queue_changed()
         return current
 
     def play_next(self, track: Track) -> None:
@@ -52,6 +58,7 @@ class QueueManager:
 
         insert_pos = self.current_index + 1
         self.queue.insert(insert_pos, track)
+        self._notify_queue_changed()
 
     def add_to_queue(self, track: Track) -> None:
         """Appends a track to the end of the queue."""
@@ -59,6 +66,41 @@ class QueueManager:
             self.set_queue([track], 0)
             return
         self.queue.append(track)
+        self._notify_queue_changed()
+
+    def play_at(self, index: int) -> Optional[Track]:
+        """Selects a queue entry and notifies listeners without replacing the queue."""
+        if not 0 <= index < len(self.queue):
+            return None
+
+        self.current_index = index
+        current = self.current_track
+        if self.on_track_changed:
+            self.on_track_changed(current)
+        self._notify_queue_changed()
+        return current
+
+    def reorder_at(self, old_index: int, new_index: int) -> bool:
+        """Moves a queue entry while keeping the current track selected."""
+        if not (
+            0 <= old_index < len(self.queue)
+            and 0 <= new_index < len(self.queue)
+        ):
+            return False
+        if old_index == new_index:
+            return True
+
+        self.queue.insert(new_index, self.queue.pop(old_index))
+        if self.current_index == old_index:
+            self.current_index = new_index
+        elif old_index < self.current_index <= new_index:
+            self.current_index -= 1
+        elif new_index <= self.current_index < old_index:
+            self.current_index += 1
+
+        self.original_queue = list(self.queue)
+        self._notify_queue_changed()
+        return True
 
     def next_track(self) -> Optional[Track]:
         """Advances to the next track according to repeat mode."""
@@ -83,6 +125,7 @@ class QueueManager:
         current = self.current_track
         if self.on_track_changed:
             self.on_track_changed(current)
+        self._notify_queue_changed()
         return current
 
     def prev_track(self) -> Optional[Track]:
@@ -103,6 +146,7 @@ class QueueManager:
         current = self.current_track
         if self.on_track_changed:
             self.on_track_changed(current)
+        self._notify_queue_changed()
         return current
 
     def remove_at(self, index: int) -> None:
@@ -116,6 +160,7 @@ class QueueManager:
                     self.current_index = len(self.queue) - 1
                 if self.on_track_changed:
                     self.on_track_changed(self.current_track)
+            self._notify_queue_changed()
 
     def clear(self) -> None:
         """Clears the queue."""
@@ -124,3 +169,4 @@ class QueueManager:
         self.current_index = -1
         if self.on_track_changed:
             self.on_track_changed(None)
+        self._notify_queue_changed()

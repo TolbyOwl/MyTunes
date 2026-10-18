@@ -22,7 +22,9 @@ class PivotNav(ft.Container):
         self.active_index = active_index
         self._mt = theme
         self.on_section_change = on_section_change
-        self.header_buttons: List[ft.Container] = []
+        self.header_buttons: List[ft.Control] = []
+        self.header_texts: List[ft.Text] = []
+        self.header_indicators: List[ft.Container] = []
 
         self._build_nav()
 
@@ -32,6 +34,8 @@ class PivotNav(ft.Container):
         self.bgcolor = self._mt.bg_color
 
         self.header_buttons.clear()
+        self.header_texts.clear()
+        self.header_indicators.clear()
         for idx, title in enumerate(self.sections):
             is_active = (idx == self.active_index)
             btn = self._create_pivot_item(title, idx, is_active)
@@ -53,9 +57,24 @@ class PivotNav(ft.Container):
             animate_size=200,
             animate_opacity=200,
         )
+        indicator = ft.Container(
+            width=28 if is_active else 0,
+            height=2,
+            bgcolor=self._mt.current_accent,
+            animate_size=ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_opacity=ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC),
+            opacity=1 if is_active else 0,
+        )
+        self.header_texts.append(text)
+        self.header_indicators.append(indicator)
 
         return ft.Container(
-            content=text,
+            content=ft.Column(
+                controls=[text, indicator],
+                spacing=4,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+            ),
             ink=True,
             on_click=lambda e, i=index: self._on_item_click(i),
             padding=ft.Padding.symmetric(vertical=4, horizontal=6),
@@ -74,11 +93,12 @@ class PivotNav(ft.Container):
             self._update_styles()
 
     def _update_styles(self) -> None:
-        for idx, container in enumerate(self.header_buttons):
+        for idx, text_ctrl in enumerate(self.header_texts):
             is_active = (idx == self.active_index)
-            text_ctrl = container.content
-            if isinstance(text_ctrl, ft.Text):
-                text_ctrl.size = 22 if is_active else 18
-                text_ctrl.weight = ft.FontWeight.W_800 if is_active else ft.FontWeight.W_400
-                text_ctrl.color = self._mt.current_accent if is_active else self._mt.text_secondary
+            text_ctrl.size = 22 if is_active else 18
+            text_ctrl.weight = ft.FontWeight.W_800 if is_active else ft.FontWeight.W_400
+            text_ctrl.color = self._mt.current_accent if is_active else self._mt.text_secondary
+            indicator = self.header_indicators[idx]
+            indicator.width = 28 if is_active else 0
+            indicator.opacity = 1 if is_active else 0
         safe_update(self)

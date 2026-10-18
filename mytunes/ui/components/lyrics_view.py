@@ -1,31 +1,50 @@
 from __future__ import annotations
 from mytunes.ui.dialog_utils import safe_update
 import flet as ft
-from typing import List, Optional
+from typing import Callable, List
 from mytunes.enrichment.lyrics import LyricsEngine, LyricsLine
 from mytunes.models.track import Track
 
 class LyricsView(ft.Container):
     """Component rendering real-time synchronized karaoke-style lyrics."""
 
-    def __init__(self, page: ft.Page):
+    def __init__(self, page: ft.Page, on_seek: Callable[[float], None]):
         super().__init__()
         self.app_page = page
+        self.on_seek = on_seek
         self.lyrics_engine = LyricsEngine()
         self.lines: List[LyricsLine] = []
         self.plain_lyrics: str = ""
         self.active_index: int = -1
         self.is_loading: bool = False
+        self.auto_follow = True
+        self.line_scroll_keys: List[ft.ScrollKey] = []
 
         self.lyrics_column = ft.Column(
             scroll=ft.ScrollMode.AUTO,
             spacing=16,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            expand=True
+            expand=True,
+            on_scroll=self._on_scroll
+        )
+        self.resume_auto_scroll_button = ft.TextButton(
+            "Resume auto-scroll",
+            visible=False,
+            on_click=self._resume_auto_scroll
         )
 
         self.content = ft.Container(
-            content=self.lyrics_column,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [self.resume_auto_scroll_button],
+                        alignment=ft.MainAxisAlignment.CENTER
+                    ),
+                    self.lyrics_column
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True
+            ),
             alignment=ft.Alignment.CENTER,
             padding=30,
             expand=True
@@ -38,6 +57,8 @@ class LyricsView(ft.Container):
         self.plain_lyrics = ""
         self.active_index = -1
         self.is_loading = True
+        self.auto_follow = True
+        self.resume_auto_scroll_button.visible = False
 
         self.lyrics_column.controls = [
             ft.ProgressRing(),
@@ -62,18 +83,25 @@ class LyricsView(ft.Container):
         self.lyrics_column.controls.clear()
 
         if self.lines:
+            self.line_scroll_keys = [
+                ft.ScrollKey(f"lyric-line-{i}") for i in range(len(self.lines))
+            ]
             # Synced lyrics line by line
             for i, line in enumerate(self.lines):
                 text_ctrl = ft.Text(
                     line.text,
+                    key=self.line_scroll_keys[i],
                     size=18,
                     weight=ft.FontWeight.W_400,
                     color=ft.Colors.GREY_500,
                     text_align=ft.TextAlign.CENTER,
-                    animate_opacity=300
+                    selectable=True,
+                    animate_opacity=300,
+                    on_tap=lambda *_, lyric_line=line: self._seek_to_line(lyric_line)
                 )
                 self.lyrics_column.controls.append(text_ctrl)
         elif self.plain_lyrics:
+            self.line_scroll_keys = []
             # Plain un-synced lyrics
             self.lyrics_column.controls.append(
                 ft.Text(
@@ -84,6 +112,7 @@ class LyricsView(ft.Container):
                 )
             )
         else:
+            self.line_scroll_keys = []
             self.lyrics_column.controls.append(
                 ft.Text(
                     "No lyrics found for this track.",
@@ -118,3 +147,29 @@ class LyricsView(ft.Container):
                 curr_ctrl.color = ft.Colors.BLUE_400  # Will adapt to theme accent
 
             safe_update(self)
+            if self.auto_follow:
+                self.app_page.run_task(self._scroll_to_line, new_idx)
+
+    def _on_scroll(self, event: ft.OnScrollEvent) -> None:
+        if self.lines and event.event_type == ft.ScrollType.USER and self.auto_follow:
+            self.auto_follow = False
+            self.resume_auto_scroll_button.visible = True
+            safe_update(self)
+
+    def _resume_auto_scroll(self) -> None:
+        self.auto_follow = True
+        self.resume_auto_scroll_button.visible = False
+        safe_update(self)
+        if 0 <= self.active_index < len(self.lines):
+            self.app_page.run_task(self._scroll_to_line, self.active_index)
+
+    async def _scroll_to_line(self, index: int) -> None:
+        if self.auto_follow and 0 <= index < len(self.lines):
+            await self.lyrics_column.scroll_to(
+                scroll_key=self.line_scroll_keys[index],
+                duration=350
+            )
+
+    def _seek_to_line(self, line: LyricsLine) -> None:
+        self.on_seek(line.time_seconds)
+        self.update_position(line.time_seconds)

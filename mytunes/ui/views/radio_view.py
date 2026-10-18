@@ -291,17 +291,24 @@ class RadioView(ft.Container):
         safe_update(self)
 
     def _build_station_card(self, station: RadioStation) -> ft.Container:
-        favicon = ft.Image(
-            src=station.favicon or None,
+        fallback_icon = ft.Container(
+            bgcolor=self._mt.surface_variant,
             width=36,
             height=36,
-            fit=ft.BoxFit.COVER,
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Icon(ft.Icons.RADIO, size=20, color=ft.Colors.GREY_500)
+        )
+        favicon_src = station.favicon.strip() if station.favicon else ""
+        favicon = (
+            ft.Image(
+                src=favicon_src,
                 width=36,
                 height=36,
-                content=ft.Icon(ft.Icons.RADIO, size=20, color=ft.Colors.GREY_500)
+                fit=ft.BoxFit.COVER,
+                error_content=fallback_icon,
             )
+            if favicon_src
+            else fallback_icon
         )
 
         info_col = ft.Column(

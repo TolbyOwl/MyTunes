@@ -69,6 +69,37 @@ class TestMyTunesCore(unittest.TestCase):
         prev_t = qm.prev_track()
         self.assertEqual(prev_t.id, "tb")
 
+    def test_queue_play_at_selects_track_and_notifies_listener(self):
+        changes = []
+        qm = QueueManager(on_track_changed=changes.append)
+        qm.set_queue(self.tracks, start_index=0)
+
+        selected = qm.play_at(3)
+
+        self.assertIs(selected, self.tracks[3])
+        self.assertEqual(qm.current_index, 3)
+        self.assertIs(qm.current_track, self.tracks[3])
+        self.assertIs(changes[-1], self.tracks[3])
+        self.assertIsNone(qm.play_at(len(self.tracks)))
+
+    def test_queue_reorder_preserves_current_track_and_manual_order(self):
+        qm = QueueManager()
+        qm.set_queue(self.tracks, start_index=2)
+
+        self.assertTrue(qm.reorder_at(0, 4))
+        self.assertEqual(
+            [track.id for track in qm.queue],
+            ["t2", "t3", "t4", "t5", "t1"],
+        )
+        self.assertEqual(qm.current_index, 1)
+        self.assertIs(qm.current_track, self.tracks[2])
+        self.assertEqual(qm.original_queue, qm.queue)
+
+        self.assertTrue(qm.reorder_at(1, 3))
+        self.assertEqual(qm.current_index, 3)
+        self.assertIs(qm.current_track, self.tracks[2])
+        self.assertFalse(qm.reorder_at(-1, 0))
+
     def test_smart_artist_distributed_shuffle(self):
         shuffled = ShuffleEngine.smart_artist_distributed(self.tracks, cooldown=1)
         self.assertEqual(len(shuffled), len(self.tracks))

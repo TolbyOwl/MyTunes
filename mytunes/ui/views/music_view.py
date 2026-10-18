@@ -3,20 +3,23 @@ from mytunes.ui.dialog_utils import safe_update, show_snackbar
 import os
 import re
 import random
+import unicodedata
 import urllib.parse
 import flet as ft
 from typing import List, Callable, Optional, Dict
 from mytunes.models.track import Track, Album
+from mytunes.models.artist_credits import split_artist_credits
 from mytunes.providers.local import LocalProvider
 from mytunes.providers.metadata import ArtistMetadataProvider
 from mytunes.ui.theme import MetroTheme
 import threading
 
+
 class MusicView(ft.Container):
     """
     Main Music Library View.
     Supports viewing Songs, Albums, Artists, and Favorites,
-    with instant full-text search, album details page, and directory scanning.
+    with instant full-text search and album details.
     """
 
     def __init__(
@@ -39,6 +42,7 @@ class MusicView(ft.Container):
         self.all_tracks: List[Track] = []
         self.displayed_tracks: List[Track] = []
         self.current_subview = "songs"  # songs, albums, artists, favorites, album_detail, artist_detail
+        self.current_sort = "alpha_asc"  # alpha_asc, alpha_desc, date_desc, date_asc
         self.selected_album_name: Optional[str] = None
         self.selected_album_artist: Optional[str] = None
         self.selected_artist_name: Optional[str] = None
@@ -46,9 +50,6 @@ class MusicView(ft.Container):
 
         self.expand = True
         self.padding = ft.Padding.all(24)
-
-        # File picker for scanning folders (self-registers as a Service in Flet 1.0+)
-        self.file_picker = ft.FilePicker(on_result=self._on_folder_picked)
 
         self._build_view()
         self.load_tracks()
@@ -65,13 +66,7 @@ class MusicView(ft.Container):
             on_change=self._on_search_change
         )
 
-        scan_btn = ft.FilledButton(
-            "Scan Folder",
-            icon=ft.Icons.FOLDER_OPEN,
-            on_click=self._on_scan_clicked
-        )
-
-        self.top_bar = ft.Row([self.search_input, scan_btn], spacing=16)
+        self.top_bar = ft.Row([self.search_input], spacing=16)
 
         # Sub-tabs (Metro text style)
         self.tab_songs = self._create_subtab("Songs", "songs", True)
@@ -79,9 +74,42 @@ class MusicView(ft.Container):
         self.tab_artists = self._create_subtab("Artists", "artists", False)
         self.tab_favorites = self._create_subtab("Favorites", "favorites", False)
 
+        # Sort Dropdown menu
+        self.sort_dropdown = ft.Dropdown(
+            value=self.current_sort,
+            options=[
+                ft.dropdown.Option("alpha_asc", "A to Z (Ascending)"),
+                ft.dropdown.Option("alpha_desc", "Z to A (Descending)"),
+                ft.dropdown.Option("date_desc", "Addition Date (Newest)"),
+                ft.dropdown.Option("date_asc", "Addition Date (Oldest)"),
+            ],
+            height=36,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            text_size=12,
+            border_color=self._mt.border_color,
+            focused_border_color=self._mt.current_accent,
+            on_select=self._on_sort_change,
+        )
+
+        self.sort_container = ft.Row(
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Icon(ft.Icons.SORT, size=18, color=self._mt.text_secondary),
+                self.sort_dropdown,
+            ]
+        )
+
         self.subtabs_row = ft.Row(
-            spacing=20,
-            controls=[self.tab_songs, self.tab_albums, self.tab_artists, self.tab_favorites]
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Row(
+                    spacing=20,
+                    controls=[self.tab_songs, self.tab_albums, self.tab_artists, self.tab_favorites]
+                ),
+                self.sort_container
+            ]
         )
 
         # Dynamic content area container that swaps between list and album view
@@ -106,9 +134,14 @@ class MusicView(ft.Container):
             padding=ft.Padding.symmetric(horizontal=8, vertical=4)
         )
 
+    def _on_sort_change(self, e) -> None:
+        self.current_sort = self.sort_dropdown.value or "alpha_asc"
+        self._filter_and_render()
+
     def _switch_subview(self, mode: str) -> None:
         self.current_subview = mode
         self.subtabs_row.visible = True
+        self.sort_container.visible = True
         # Update tab colors
         for container, m in [(self.tab_songs, "songs"), (self.tab_albums, "albums"),
                              (self.tab_artists, "artists"), (self.tab_favorites, "favorites")]:
@@ -135,6 +168,16 @@ class MusicView(ft.Container):
         if self.current_subview == "favorites":
             tracks = [t for t in tracks if t.is_favorite]
 
+        # Apply sorting to track list for songs / favorites subview
+        if self.current_sort == "alpha_desc":
+            tracks = sorted(tracks, key=lambda t: (t.title or "").lower(), reverse=True)
+        elif self.current_sort == "date_desc":
+            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0, reverse=True)
+        elif self.current_sort == "date_asc":
+            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0)
+        else:  # alpha_asc default
+            tracks = sorted(tracks, key=lambda t: (t.title or "").lower())
+
         self.displayed_tracks = tracks
 
         if self.current_subview == "albums":
@@ -143,7 +186,10 @@ class MusicView(ft.Container):
             self._render_artists_tab(tracks, query)
         elif self.current_subview == "album_detail":
             if self.selected_album_name:
-                self._render_album_page(self.selected_album_name, self.selected_album_artist)
+                self._render_album_page(
+                    self.selected_album_name,
+                    self.selected_album_artist or "",
+                )
             else:
                 self._switch_subview("albums")
         elif self.current_subview == "artist_detail":
@@ -156,7 +202,23 @@ class MusicView(ft.Container):
 
     def _render_songs_tab(self, tracks: List[Track]) -> None:
         """Renders standard songs/favorites list."""
-        songs_list = ft.ListView(expand=True, spacing=4, divider_thickness=0.5)
+        alpha_sorted = self.current_sort in {"alpha_asc", "alpha_desc"}
+        self._song_group_keys: Dict[str, ft.ScrollKey] = {}
+        self.song_index_buttons: Dict[str, ft.Control] = {}
+        if alpha_sorted:
+            songs_list = ft.Column(
+                expand=True,
+                spacing=4,
+                scroll=ft.ScrollMode.AUTO,
+            )
+        else:
+            songs_list = ft.ListView(
+                expand=True,
+                spacing=4,
+                divider_thickness=0.5,
+                scroll=ft.ScrollMode.AUTO,
+            )
+        self.songs_list = songs_list
 
         if not tracks:
             songs_list.controls.append(
@@ -169,24 +231,142 @@ class MusicView(ft.Container):
                         controls=[
                             ft.Icon(ft.Icons.MUSIC_OFF, size=48, color=ft.Colors.GREY_600),
                             ft.Text("No tracks found", size=16, weight=ft.FontWeight.W_600, color=self._mt.text_secondary),
-                            ft.Text("Click 'Scan Folder' to import your local music library.", size=13, color=ft.Colors.GREY_500)
+                            ft.Text("Add music folders and scan them from Settings.", size=13, color=ft.Colors.GREY_500)
                         ]
                     )
                 )
             )
         else:
-            for t in tracks:
-                songs_list.controls.append(self._build_track_row(t))
+            songs_list.controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(bottom=8),
+                    content=ft.OutlinedButton(
+                        "Play all on shuffle",
+                        icon=ft.Icons.SHUFFLE,
+                        on_click=lambda e, song_tracks=list(tracks): self._play_songs_random(song_tracks),
+                    ),
+                )
+            )
 
-        self.content_area.content = songs_list
+            if alpha_sorted:
+                grouped_tracks: Dict[str, List[Track]] = {}
+                for track in tracks:
+                    group = self._track_index_group(track)
+                    grouped_tracks.setdefault(group, []).append(track)
+
+                letter_order = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                if self.current_sort == "alpha_desc":
+                    letter_order.reverse()
+                group_order = ["#", *letter_order, "~"]
+                self._song_group_keys = {
+                    group: ft.ScrollKey(f"songs-index-{group}")
+                    for group in grouped_tracks
+                }
+                for group in group_order:
+                    group_tracks = grouped_tracks.get(group)
+                    if not group_tracks:
+                        continue
+                    songs_list.controls.append(
+                        ft.Container(
+                            key=self._song_group_keys[group],
+                            padding=ft.Padding.only(top=12, bottom=4),
+                            content=ft.Text(
+                                group,
+                                size=18,
+                                weight=ft.FontWeight.W_800,
+                                color=self._mt.current_accent,
+                            ),
+                        )
+                    )
+                    songs_list.controls.extend(
+                        self._build_track_row(track) for track in group_tracks
+                    )
+                self.content_area.content = ft.Row(
+                    expand=True,
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                    controls=[
+                        ft.Container(content=songs_list, expand=1),
+                        self._build_song_letter_rail(group_order),
+                    ],
+                )
+            else:
+                self._song_group_keys = {}
+                songs_list.controls.extend(self._build_track_row(track) for track in tracks)
+
+        if not tracks or not alpha_sorted:
+            self.content_area.content = songs_list
         safe_update(self)
+
+    def _build_song_letter_rail(self, group_order: List[str]) -> ft.Control:
+        self.song_index_buttons = {}
+        for group in group_order:
+            button = ft.TextButton(
+                group,
+                disabled=group not in self._song_group_keys,
+                on_click=lambda _, target=group: self._on_song_letter_click(target),
+                style=ft.ButtonStyle(
+                    padding=0,
+                    color=self._mt.current_accent,
+                    text_style=ft.TextStyle(size=12, weight=ft.FontWeight.W_600),
+                ),
+                width=32,
+                height=22,
+            )
+            self.song_index_buttons[group] = button
+
+        return ft.Column(
+            width=36,
+            spacing=0,
+            scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=list(self.song_index_buttons.values()),
+        )
+
+    @staticmethod
+    def _track_index_group(track: Track) -> str:
+        title = (track.title or "").strip()
+        if not title:
+            return "~"
+
+        first_char = unicodedata.normalize("NFKD", title[0]).upper()
+        if first_char and "A" <= first_char[0] <= "Z":
+            return first_char[0]
+        if title[0].isdigit():
+            return "#"
+        return "~"
+
+    def _play_songs_random(self, tracks: List[Track]) -> None:
+        shuffled = list(tracks)
+        random.shuffle(shuffled)
+        if shuffled:
+            self.on_play_track(shuffled[0], shuffled)
+            show_snackbar(self.app_page, f"Playing {len(shuffled)} songs on shuffle")
+
+    def _on_song_letter_click(self, group: str) -> None:
+        if (
+            self.current_sort in {"alpha_asc", "alpha_desc"}
+            and group in self._song_group_keys
+        ):
+            self.app_page.run_task(self._jump_to_song_group, group)
+
+    async def _jump_to_song_group(self, group: str) -> None:
+        if (
+            self.current_sort not in {"alpha_asc", "alpha_desc"}
+            or group not in self._song_group_keys
+        ):
+            return
+        await self.songs_list.scroll_to(
+            scroll_key=str(self._song_group_keys[group]),
+            duration=280,
+            curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+        )
 
     def _render_albums_tab(self, tracks: List[Track], query: str = "") -> None:
         """Renders Album tiles grid: square container (Metro style), album name, and smaller artist name below."""
-        albums_map: Dict[str, Dict] = {}
+        albums_map: Dict[tuple[str, str], Dict] = {}
         for t in tracks:
-            alb_key = (t.album or "Unknown Album").strip()
-            art = (t.album_artist or t.artist or "Unknown Artist").strip()
+            alb_key, art = self._album_identity(t)
             key = (alb_key.lower(), art.lower())
             if key not in albums_map:
                 albums_map[key] = {
@@ -194,16 +374,27 @@ class MusicView(ft.Container):
                     "artist": art,
                     "artwork_path": t.artwork_path,
                     "year": t.year,
+                    "date_added": t.date_added or 0.0,
                     "tracks": [t]
                 }
             else:
                 albums_map[key]["tracks"].append(t)
+                if (t.date_added or 0.0) > albums_map[key]["date_added"]:
+                    albums_map[key]["date_added"] = t.date_added or 0.0
                 if not albums_map[key]["artwork_path"] and t.artwork_path:
                     albums_map[key]["artwork_path"] = t.artwork_path
                 if not albums_map[key]["year"] and t.year:
                     albums_map[key]["year"] = t.year
 
-        albums_list = sorted(list(albums_map.values()), key=lambda a: a["name"].lower())
+        # Sort albums based on user selected sort option
+        if self.current_sort == "alpha_desc":
+            albums_list = sorted(list(albums_map.values()), key=lambda a: a["name"].lower(), reverse=True)
+        elif self.current_sort == "date_desc":
+            albums_list = sorted(list(albums_map.values()), key=lambda a: a.get("date_added", 0.0), reverse=True)
+        elif self.current_sort == "date_asc":
+            albums_list = sorted(list(albums_map.values()), key=lambda a: a.get("date_added", 0.0))
+        else:  # alpha_asc default
+            albums_list = sorted(list(albums_map.values()), key=lambda a: a["name"].lower())
 
         if not albums_list:
             self.content_area.content = ft.Container(
@@ -235,19 +426,11 @@ class MusicView(ft.Container):
         artist_name = album_info["artist"]
         art_path = album_info.get("artwork_path")
 
-        cover_img = ft.Image(
-            src=art_path or None,
-            width=160,
-            height=160,
-            fit=ft.BoxFit.COVER,
-            border_radius=0,  # Square Metro style
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
-                width=160,
-                height=160,
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(ft.Icons.ALBUM, size=56, color=ft.Colors.GREY_500)
-            )
+        cover_img, _ = self._build_artwork(
+            art_path,
+            size=160,
+            placeholder_icon=ft.Icons.ALBUM,
+            icon_size=56,
         )
 
         return ft.Container(
@@ -288,28 +471,41 @@ class MusicView(ft.Container):
         """Renders Metro tiles grid for Artists in your library."""
         artists_map: Dict[str, Dict] = {}
         for t in tracks:
-            art = (t.artist or "Unknown Artist").strip()
-            if not art:
-                art = "Unknown Artist"
-            art_lower = art.lower()
-            if art_lower not in artists_map:
-                # Check if we have cached metadata in sqlite
-                cached = self.metadata_provider.get_cached_metadata(art)
-                artists_map[art_lower] = {
-                    "name": art,
-                    "picture_url": cached.get("picture_medium") if cached else None,
-                    "local_fallback_art": t.artwork_path,
-                    "albums": {t.album} if t.album else set(),
-                    "tracks": [t]
-                }
-            else:
-                artists_map[art_lower]["tracks"].append(t)
-                if t.album:
-                    artists_map[art_lower]["albums"].add(t.album)
-                if not artists_map[art_lower]["local_fallback_art"] and t.artwork_path:
-                    artists_map[art_lower]["local_fallback_art"] = t.artwork_path
+            artist_credits = list(dict.fromkeys([
+                *self._track_artist_names(t),
+                *self._track_album_artist_names(t),
+            ]))
+            for artist in artist_credits:
+                artist_key = artist.casefold()
+                if artist_key not in artists_map:
+                    cached = self.metadata_provider.get_cached_metadata(artist)
+                    artists_map[artist_key] = {
+                        "name": artist,
+                        "picture_url": cached.get("picture_medium") if cached else None,
+                        "local_fallback_art": t.artwork_path,
+                        "albums": {t.album} if t.album else set(),
+                        "date_added": t.date_added or 0.0,
+                        "tracks": [t]
+                    }
+                elif all(existing.id != t.id for existing in artists_map[artist_key]["tracks"]):
+                    artists_map[artist_key]["tracks"].append(t)
+                    if t.album:
+                        artists_map[artist_key]["albums"].add(t.album)
+                    if not artists_map[artist_key]["local_fallback_art"] and t.artwork_path:
+                        artists_map[artist_key]["local_fallback_art"] = t.artwork_path
 
-        artists_list = sorted(list(artists_map.values()), key=lambda a: a["name"].lower())
+                if (t.date_added or 0.0) > artists_map[artist_key]["date_added"]:
+                    artists_map[artist_key]["date_added"] = t.date_added or 0.0
+
+        # Sort artists based on user selected sort option
+        if self.current_sort == "alpha_desc":
+            artists_list = sorted(list(artists_map.values()), key=lambda a: a["name"].lower(), reverse=True)
+        elif self.current_sort == "date_desc":
+            artists_list = sorted(list(artists_map.values()), key=lambda a: a.get("date_added", 0.0), reverse=True)
+        elif self.current_sort == "date_asc":
+            artists_list = sorted(list(artists_map.values()), key=lambda a: a.get("date_added", 0.0))
+        else:  # alpha_asc default
+            artists_list = sorted(list(artists_map.values()), key=lambda a: a["name"].lower())
 
         if not artists_list:
             self.content_area.content = ft.Container(
@@ -344,19 +540,11 @@ class MusicView(ft.Container):
 
         pic_src = artist_info.get("picture_url") or artist_info.get("local_fallback_art")
 
-        artist_img = ft.Image(
-            src=pic_src or None,
-            width=160,
-            height=160,
-            fit=ft.BoxFit.COVER,
-            border_radius=0,  # Metro square style
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
-                width=160,
-                height=160,
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(ft.Icons.PERSON, size=60, color=ft.Colors.GREY_500)
-            )
+        artist_artwork, artist_img = self._build_artwork(
+            pic_src,
+            size=160,
+            placeholder_icon=ft.Icons.PERSON,
+            icon_size=60,
         )
 
         # Trigger background fetch if artist has no cached picture yet
@@ -366,6 +554,7 @@ class MusicView(ft.Container):
                 pic = meta.get("picture_medium") or meta.get("picture_url")
                 if pic and img_ctrl.src != pic:
                     img_ctrl.src = pic
+                    img_ctrl.visible = True
                     safe_update(img_ctrl)
 
             threading.Thread(target=_bg_fetch, args=(art_name, artist_img), daemon=True).start()
@@ -381,7 +570,7 @@ class MusicView(ft.Container):
                 spacing=6,
                 horizontal_alignment=ft.CrossAxisAlignment.START,
                 controls=[
-                    artist_img,
+                    artist_artwork,
                     ft.Text(
                         art_name,
                         size=13,
@@ -409,13 +598,66 @@ class MusicView(ft.Container):
         self.selected_album_name = album_name
         self.selected_album_artist = album_artist
         self.current_subview = "album_detail"
+        self.sort_container.visible = False
         self._render_album_page(album_name, album_artist)
 
     def _open_artist_page(self, artist_name: str) -> None:
         """Transitions into the detailed artist page."""
         self.selected_artist_name = artist_name
         self.current_subview = "artist_detail"
+        self.sort_container.visible = False
         self._render_artist_page(artist_name)
+
+    @staticmethod
+    def _split_artist_credits(credit: str | None) -> list[str]:
+        """Splits common multi-artist tag separators while preserving unspaced slashes."""
+        return split_artist_credits(credit)
+
+    @classmethod
+    def _track_artist_names(cls, track: Track) -> list[str]:
+        return cls._split_artist_credits(track.artist)
+
+    @classmethod
+    def _track_album_artist_names(cls, track: Track) -> list[str]:
+        return cls._split_artist_credits(track.album_artist)
+
+    @classmethod
+    def _track_has_artist(cls, track: Track, artist_name: str) -> bool:
+        artist_key = artist_name.strip().casefold()
+        return artist_key in {
+            artist.casefold()
+            for artist in (
+                *cls._track_artist_names(track),
+                *cls._track_album_artist_names(track),
+            )
+        }
+
+    @classmethod
+    def _track_is_album_by_artist(cls, track: Track, artist_name: str) -> bool:
+        artist_key = artist_name.strip().casefold()
+        album_artist_names = cls._track_album_artist_names(track)
+        if album_artist_names:
+            return artist_key == album_artist_names[0].casefold()
+        return artist_key in {
+            name.casefold() for name in cls._track_artist_names(track)
+        }
+
+    @classmethod
+    def _album_identity(cls, track: Track) -> tuple[str, str]:
+        album_name = (track.album or "Unknown Album").strip()
+        album_artists = cls._track_album_artist_names(track)
+        if not album_artists:
+            album_artists = cls._track_artist_names(track)
+        album_artist = album_artists[0] if album_artists else "Unknown Artist"
+        return album_name, album_artist
+
+    @classmethod
+    def _same_album(cls, track: Track, album_name: str, album_artist: str) -> bool:
+        track_album, track_album_artist = cls._album_identity(track)
+        return (
+            track_album.casefold() == album_name.strip().casefold()
+            and track_album_artist.casefold() == album_artist.strip().casefold()
+        )
 
     def _render_artist_page(self, artist_name: str) -> None:
         """
@@ -428,10 +670,10 @@ class MusicView(ft.Container):
         - All songs by this artist in your library with 3-dots menus
         """
         artist_name = (artist_name or "Unknown Artist").strip()
-        # Find all tracks by this artist in library
+        artist_key = artist_name.casefold()
         artist_tracks = [
             t for t in self.all_tracks
-            if (t.artist or "").strip().lower() == artist_name.lower() or (t.album_artist or "").strip().lower() == artist_name.lower()
+            if self._track_has_artist(t, artist_name)
         ]
 
         if not artist_tracks:
@@ -458,12 +700,19 @@ class MusicView(ft.Container):
         initial_bio = cached_meta.get("bio", "") if cached_meta else ""
         initial_fans = cached_meta.get("nb_fan", 0) if cached_meta else 0
 
-        # Unique albums
-        albums_set = set()
-        for t in artist_tracks:
-            if t.album:
-                albums_set.add(t.album)
-        total_albums = len(albums_set)
+        # Split albums by their album-artist credit from guest appearances.
+        albums_by_artist: Dict[tuple[str, str], List[Track]] = {}
+        appears_on_albums: Dict[tuple[str, str], List[Track]] = {}
+        for track in artist_tracks:
+            album_identity = self._album_identity(track)
+            if self._track_is_album_by_artist(track, artist_name):
+                albums_by_artist.setdefault(album_identity, []).append(track)
+            elif artist_key in {
+                name.casefold() for name in self._track_artist_names(track)
+            }:
+                appears_on_albums.setdefault(album_identity, []).append(track)
+
+        total_albums = len(albums_by_artist)
         total_songs = len(artist_tracks)
         total_dur_sec = sum(t.duration for t in artist_tracks)
         mins = int(total_dur_sec // 60)
@@ -472,19 +721,11 @@ class MusicView(ft.Container):
         dur_label = f"{hrs} hr {rem_m} min" if hrs > 0 else f"{mins} min"
 
         # Metro Artist Photo widget
-        artist_photo = ft.Image(
-            src=initial_pic or None,
-            width=180,
-            height=180,
-            fit=ft.BoxFit.COVER,
-            border_radius=0,  # Metro square style
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
-                width=180,
-                height=180,
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(ft.Icons.PERSON, size=80, color=ft.Colors.GREY_500)
-            )
+        artist_photo_artwork, artist_photo = self._build_artwork(
+            initial_pic,
+            size=180,
+            placeholder_icon=ft.Icons.PERSON,
+            icon_size=80,
         )
 
         # Fans / stats subtitle
@@ -597,7 +838,7 @@ class MusicView(ft.Container):
             content=ft.Row(
                 spacing=20,
                 vertical_alignment=ft.CrossAxisAlignment.START,
-                controls=[artist_photo, artist_info_col]
+                controls=[artist_photo_artwork, artist_info_col]
             )
         )
 
@@ -613,6 +854,7 @@ class MusicView(ft.Container):
                 updated = False
                 if pic and artist_photo.src != pic:
                     artist_photo.src = pic
+                    artist_photo.visible = True
                     updated = True
 
                 if bio_content:
@@ -638,18 +880,22 @@ class MusicView(ft.Container):
             threading.Thread(target=_load_artist_meta, daemon=True).start()
 
         # Section: Albums by this Artist
-        albums_by_artist_cards = []
-        for alb_name in sorted(list(albums_set)):
-            alb_tracks = [t for t in artist_tracks if (t.album or "").lower() == alb_name.lower()]
-            if alb_tracks:
-                a_info = {
-                    "name": alb_name,
-                    "artist": artist_name,
-                    "artwork_path": next((t.artwork_path for t in alb_tracks if t.artwork_path), None),
-                    "year": next((t.year for t in alb_tracks if t.year), None),
-                    "tracks": alb_tracks
-                }
-                albums_by_artist_cards.append(self._build_album_card(a_info))
+        albums_by_artist_cards: List[ft.Control] = [
+            self._build_album_card({
+                "name": album_name,
+                "artist": album_artist,
+                "artwork_path": next(
+                    (t.artwork_path for t in album_tracks if t.artwork_path),
+                    None,
+                ),
+                "year": next((t.year for t in album_tracks if t.year), None),
+                "tracks": album_tracks,
+            })
+            for (album_name, album_artist), album_tracks in sorted(
+                albums_by_artist.items(),
+                key=lambda item: (item[0][0].casefold(), item[0][1].casefold()),
+            )
+        ]
 
         albums_section: List[ft.Control] = []
         if albums_by_artist_cards:
@@ -660,6 +906,33 @@ class MusicView(ft.Container):
                     scroll=ft.ScrollMode.AUTO,
                     controls=albums_by_artist_cards
                 )
+            ])
+
+        appears_on_cards: List[ft.Control] = [
+            self._build_album_card({
+                "name": album_name,
+                "artist": album_artist,
+                "artwork_path": next(
+                    (t.artwork_path for t in album_tracks if t.artwork_path),
+                    None,
+                ),
+                "year": next((t.year for t in album_tracks if t.year), None),
+                "tracks": album_tracks,
+            })
+            for (album_name, album_artist), album_tracks in sorted(
+                appears_on_albums.items(),
+                key=lambda item: (item[0][0].casefold(), item[0][1].casefold()),
+            )
+        ]
+        appears_on_section: List[ft.Control] = []
+        if appears_on_cards:
+            appears_on_section.extend([
+                ft.Text("APPEARS ON", size=14, weight=ft.FontWeight.BOLD, color=self._mt.current_accent),
+                ft.Row(
+                    spacing=16,
+                    scroll=ft.ScrollMode.AUTO,
+                    controls=appears_on_cards,
+                ),
             ])
 
         # Section: Songs by this Artist
@@ -724,6 +997,7 @@ class MusicView(ft.Container):
                 back_btn,
                 header_card,
                 *albums_section,
+                *appears_on_section,
                 ft.Text("SONGS", size=14, weight=ft.FontWeight.BOLD, color=self._mt.current_accent),
                 songs_container
             ]
@@ -744,7 +1018,7 @@ class MusicView(ft.Container):
         # Find all songs for this album
         album_tracks = [
             t for t in self.all_tracks
-            if (t.album or "").strip().lower() == album_name.strip().lower()
+            if self._same_album(t, album_name, album_artist)
         ]
 
         if not album_tracks:
@@ -776,8 +1050,19 @@ class MusicView(ft.Container):
         dur_str = f"{total_hrs} hr {rem_mins} min" if total_hrs > 0 else f"{total_mins} min"
 
         # Artists & Composers
-        main_artist = first_t.album_artist or first_t.artist or album_artist or "Unknown Artist"
-        all_track_artists = sorted(list({t.artist for t in album_tracks_sorted if t.artist and t.artist != main_artist}))
+        main_artist_credits = (
+            self._track_album_artist_names(first_t)
+            or self._track_artist_names(first_t)
+            or self._split_artist_credits(album_artist)
+            or ["Unknown Artist"]
+        )
+        main_artist = main_artist_credits[0]
+        all_track_artists = sorted({
+            artist
+            for track in album_tracks_sorted
+            for artist in self._track_artist_names(track)
+            if artist.casefold() != main_artist.casefold()
+        }, key=str.casefold)
         
         # Check composers from local provider database
         composer_set = set()
@@ -839,19 +1124,11 @@ class MusicView(ft.Container):
         )
 
         # Header Album Cover
-        album_cover = ft.Image(
-            src=art_path or None,
-            width=160,
-            height=160,
-            fit=ft.BoxFit.COVER,
-            border_radius=0,  # Metro square style
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
-                width=160,
-                height=160,
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(ft.Icons.ALBUM, size=64, color=ft.Colors.GREY_500)
-            )
+        album_cover, _ = self._build_artwork(
+            art_path,
+            size=160,
+            placeholder_icon=ft.Icons.ALBUM,
+            icon_size=64,
         )
 
         # Clickable main artist widget
@@ -998,24 +1275,32 @@ class MusicView(ft.Container):
         )
 
         # Other albums from that artist in library
-        other_albums = [
-            t.album for t in self.all_tracks
-            if (t.artist == main_artist or t.album_artist == main_artist) and t.album and t.album.lower() != album_name.lower()
-        ]
-        other_album_names = sorted(list(set(other_albums)))
+        other_album_identities = {
+            self._album_identity(track)
+            for track in self.all_tracks
+            if self._track_is_album_by_artist(track, main_artist)
+            and track.album
+            and track.album.casefold() != album_name.casefold()
+        }
 
         other_albums_section: List[ft.Control] = []
-        if other_album_names:
+        if other_album_identities:
             other_albums_section.append(
                 ft.Text(f"MORE ALBUMS BY {main_artist.upper()}", size=14, weight=ft.FontWeight.BOLD, color=self._mt.current_accent)
             )
             other_cards = []
-            for o_name in other_album_names:
-                o_tracks = [t for t in self.all_tracks if (t.album or "").lower() == o_name.lower()]
+            for o_name, o_artist in sorted(
+                other_album_identities,
+                key=lambda identity: (identity[0].casefold(), identity[1].casefold()),
+            ):
+                o_tracks = [
+                    t for t in self.all_tracks
+                    if self._same_album(t, o_name, o_artist)
+                ]
                 if o_tracks:
                     o_info = {
                         "name": o_name,
-                        "artist": main_artist,
+                        "artist": o_artist,
                         "artwork_path": next((t.artwork_path for t in o_tracks if t.artwork_path), None),
                         "year": next((t.year for t in o_tracks if t.year), None),
                         "tracks": o_tracks
@@ -1088,18 +1373,11 @@ class MusicView(ft.Container):
 
     def _build_track_row(self, track: Track) -> ft.Container:
         # Album art thumbnail
-        art_img = ft.Image(
-            src=track.artwork_path or None,
-            width=40,
-            height=40,
-            fit=ft.BoxFit.COVER,
-            border_radius=0,
-            error_content=ft.Container(
-                bgcolor=self._mt.surface_variant,
-                width=40,
-                height=40,
-                content=ft.Icon(ft.Icons.MUSIC_NOTE, size=20, color=ft.Colors.GREY_500)
-            )
+        art_img, _ = self._build_artwork(
+            track.artwork_path,
+            size=40,
+            placeholder_icon=ft.Icons.MUSIC_NOTE,
+            icon_size=20,
         )
 
         title_col = ft.Column(
@@ -1140,6 +1418,45 @@ class MusicView(ft.Container):
             )
         )
 
+    def _build_artwork(
+        self,
+        src: Optional[str],
+        size: int,
+        placeholder_icon: ft.IconData,
+        icon_size: int,
+    ) -> tuple[ft.Stack, ft.Image]:
+        """Build artwork with a visible fallback until a valid image is available."""
+        placeholder = ft.Container(
+            width=size,
+            height=size,
+            bgcolor=self._mt.surface_variant,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Icon(
+                placeholder_icon,
+                size=icon_size,
+                color=ft.Colors.GREY_500,
+            ),
+        )
+        image = ft.Image(
+            src=src or "",
+            width=size,
+            height=size,
+            visible=bool(src),
+            fit=ft.BoxFit.COVER,
+            error_content=ft.Container(
+                width=size,
+                height=size,
+                bgcolor=self._mt.surface_variant,
+                alignment=ft.Alignment(0, 0),
+                content=ft.Icon(
+                    placeholder_icon,
+                    size=icon_size,
+                    color=ft.Colors.GREY_500,
+                ),
+            ),
+        )
+        return ft.Stack(width=size, height=size, controls=[placeholder, image]), image
+
     def _toggle_fav(self, track: Track) -> None:
         track.is_favorite = not track.is_favorite
         self.provider.conn.execute("UPDATE tracks SET is_favorite = ? WHERE id = ?", (1 if track.is_favorite else 0, track.id))
@@ -1148,31 +1465,3 @@ class MusicView(ft.Container):
 
     def _on_search_change(self, e) -> None:
         self._filter_and_render()
-
-    async def _on_scan_clicked(self, e) -> None:
-        path = await self.file_picker.get_directory_path(dialog_title="Select Music Folder")
-        if path:
-            self._scan_folder(path)
-
-    def _on_folder_picked(self, e: ft.FilePickerResultEvent) -> None:
-        if e.path:
-            self._scan_folder(e.path)
-
-    def _scan_folder(self, path: str) -> None:
-        # Show progress indicator
-        self.content_area.content = ft.Container(
-            alignment=ft.Alignment.CENTER,
-            padding=40,
-            content=ft.Column(
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=12,
-                controls=[
-                    ft.ProgressRing(),
-                    ft.Text(f"Scanning {path}...", size=14, color=self._mt.text_primary)
-                ]
-            )
-        )
-        safe_update(self)
-
-        self.provider.scan_directory(path)
-        self.load_tracks()

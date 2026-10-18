@@ -1,14 +1,22 @@
+import asyncio
 import threading
 import flet as ft
 import time
 import sqlite3
 import re
 import html
+import logging
 from typing import List, Callable, Optional
 from mytunes.models.podcast import PodcastShow, Episode
+from mytunes.providers.podcast_cache import PodcastCache
 from mytunes.providers.podcasts import PodcastProvider
 from mytunes.ui.theme import MetroTheme
 from mytunes.ui.dialog_utils import safe_update, show_snackbar, open_dialog, close_dialog
+
+logger = logging.getLogger(__name__)
+PODCAST_CACHE_TTL_SECONDS = 24 * 60 * 60
+INITIAL_EPISODE_BATCH_SIZE = 100
+EPISODE_BATCH_SIZE = 20
 
 class PodcastsView(ft.Container):
     """
@@ -36,6 +44,16 @@ class PodcastsView(ft.Container):
         self.selected_episode: Optional[Episode] = None
         self._current_screen: str = "subscriptions"  # "subscriptions", "search", "loading", "details", "episode_detail", "error"
         self._active_load_id: int = 0
+        self._active_search_id: int = 0
+        self._episode_render_id: int = 0
+        self._episode_render_offset: int = 0
+        self._episode_render_episodes: List[Episode] = []
+        self._episode_batch_loading = False
+        self._search_error: Optional[str] = None
+        self._feed_refresh_error: Optional[str] = None
+        self._feed_refresh_status: Optional[str] = None
+        self._feed_refreshing = False
+        self.cache = PodcastCache(db_conn)
 
         self.expand = True
         self.padding = ft.Padding.all(24)
@@ -73,6 +91,7 @@ class PodcastsView(ft.Container):
 
     def load_subscriptions(self) -> None:
         """Loads subscribed podcasts from SQLite database."""
+        self._active_load_id += 1
         self._current_screen = "subscriptions"
         cursor = self.conn.execute("SELECT id, title, author, description, feed_url, artwork_url, date_subscribed FROM podcasts ORDER BY date_subscribed DESC")
         self.subscribed_shows = [
@@ -124,6 +143,7 @@ class PodcastsView(ft.Container):
 
     def _render_subscriptions_view(self) -> None:
         self._current_screen = "subscriptions"
+        self.content_area.scroll = ft.ScrollMode.AUTO
         self.content_area.controls.clear()
 
         if self.subscribed_shows:
@@ -174,12 +194,63 @@ class PodcastsView(ft.Container):
             self.load_subscriptions()
             return
 
-        self.content_area.controls = [
-            ft.Container(alignment=ft.Alignment.CENTER, padding=40, content=ft.ProgressRing())
-        ]
-        safe_update(self)
+        self.content_area.scroll = ft.ScrollMode.AUTO
+        self._active_search_id += 1
+        request_id = self._active_search_id
+        self._search_error = None
+        cached = self.cache.get_search_results(query, limit=20)
+        if cached is not None:
+            self.search_results, fetched_at = cached
+            self._render_search_results()
+            if time.time() - fetched_at < PODCAST_CACHE_TTL_SECONDS:
+                return
+        else:
+            self._current_screen = "loading"
+            self.content_area.controls = [
+                ft.Container(alignment=ft.Alignment.CENTER, padding=40, content=ft.ProgressRing())
+            ]
+            safe_update(self)
 
-        self.search_results = self.provider.search_itunes(query, limit=20)
+        threading.Thread(
+            target=self._search_worker,
+            args=(query, request_id),
+            daemon=True,
+        ).start()
+
+    def _search_worker(self, query: str, request_id: int) -> None:
+        try:
+            shows = self.provider.search_itunes(query, limit=20)
+            self.cache.store_search_results(query, 20, shows)
+            error = None
+        except Exception as exc:
+            logger.warning("Podcast search refresh failed for %r: %s", query, exc)
+            shows = None
+            error = str(exc)
+
+        async def apply_results() -> None:
+            self._apply_search_results(query, request_id, shows, error)
+
+        self.app_page.run_task(apply_results)
+
+    def _apply_search_results(
+        self,
+        query: str,
+        request_id: int,
+        shows: Optional[List[PodcastShow]],
+        error: Optional[str],
+    ) -> None:
+        if (
+            request_id != self._active_search_id
+            or self._current_screen not in ("search", "loading")
+            or (self.search_input.value or "").strip() != query
+        ):
+            return
+
+        if shows is not None:
+            self.search_results = shows
+            self._search_error = None
+        else:
+            self._search_error = error or "The podcast search could not be completed."
         self._render_search_results()
 
     def _on_search_submit(self, e) -> None:
@@ -187,6 +258,7 @@ class PodcastsView(ft.Container):
 
     def _render_search_results(self) -> None:
         self._current_screen = "search"
+        self.content_area.scroll = ft.ScrollMode.AUTO
         self.content_area.controls.clear()
 
         back_to_subs_btn = ft.TextButton("← My Subscriptions", on_click=lambda e: self.load_subscriptions())
@@ -196,9 +268,14 @@ class PodcastsView(ft.Container):
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
 
         if not self.search_results:
+            message = (
+                "Search could not be completed. Please check your connection and try again."
+                if self._search_error
+                else "No podcasts found."
+            )
             self.content_area.controls.extend([
                 header,
-                ft.Container(alignment=ft.Alignment.CENTER, content=ft.Text("No podcasts found.", color=self._mt.text_secondary))
+                ft.Container(alignment=ft.Alignment.CENTER, content=ft.Text(message, color=self._mt.text_secondary))
             ])
             safe_update(self)
             return
@@ -214,7 +291,13 @@ class PodcastsView(ft.Container):
         for show in self.search_results:
             results_grid.controls.append(self._build_show_card(show))
 
-        self.content_area.controls.extend([header, results_grid])
+        controls: list[ft.Control] = [header]
+        if self._search_error:
+            controls.append(
+                ft.Text("Showing saved results; the directory could not be refreshed.", color=self._mt.text_secondary, size=12)
+            )
+        controls.append(results_grid)
+        self.content_area.controls.extend(controls)
         safe_update(self)
 
     def _build_show_card(self, show: PodcastShow) -> ft.Container:
@@ -257,6 +340,8 @@ class PodcastsView(ft.Container):
     def _navigate_back(self) -> None:
         """Navigates back to the appropriate previous screen."""
         self._active_load_id += 1  # Invalidate any in-progress loading requests
+        self._feed_refreshing = False
+        self._feed_refresh_status = None
         if self._current_screen == "episode_detail" and self.selected_show:
             self._render_show_episodes(self.selected_show)
             return
@@ -266,13 +351,26 @@ class PodcastsView(ft.Container):
         else:
             self.load_subscriptions()
 
-    def _open_show_details(self, show: PodcastShow) -> None:
-        """Parses the podcast RSS feed in a background thread and renders episode list with loading & error screens."""
+    def _open_show_details(self, show: PodcastShow, force_refresh: bool = False) -> None:
+        """Displays cached feed data immediately and refreshes it when stale or requested."""
         self._active_load_id += 1
-        current_load_id = self._active_load_id
-        self._current_screen = "loading"
+        request_id = self._active_load_id
+        self._feed_refreshing = False
+        self._feed_refresh_status = None
+        cached = self.cache.get_feed(show.feed_url)
 
-        # Dedicated loading view with podcast metadata & Back/Cancel action
+        if cached is not None:
+            cached_show, fetched_at = cached
+            self.selected_show = cached_show
+            self._feed_refresh_error = None
+            self._feed_refresh_status = None
+            self._render_show_episodes(cached_show)
+            if not force_refresh and time.time() - fetched_at < PODCAST_CACHE_TTL_SECONDS:
+                return
+            self._begin_feed_refresh(show, request_id, had_cached_data=True)
+            return
+
+        self._current_screen = "loading"
         loading_card = ft.Container(
             bgcolor=self._mt.surface_color,
             border=ft.Border.all(1, self._mt.border_color),
@@ -297,11 +395,9 @@ class PodcastsView(ft.Container):
                 ]
             )
         )
-
         back_top_btn = ft.Row([
             ft.TextButton("Back", icon=ft.Icons.ARROW_BACK, on_click=lambda e: self._navigate_back())
         ])
-
         self.content_area.controls = [
             back_top_btn,
             ft.Container(
@@ -311,39 +407,82 @@ class PodcastsView(ft.Container):
             )
         ]
         safe_update(self)
+        self._begin_feed_refresh(show, request_id, had_cached_data=False)
 
-        def on_fetch_completed(res_show):
-            if self._active_load_id != current_load_id:
-                return
-            if not res_show or not res_show.episodes:
-                self._render_load_error(show)
-            else:
-                self.selected_show = res_show
-                self._render_show_episodes(res_show)
+    def _begin_feed_refresh(
+        self,
+        show: PodcastShow,
+        request_id: int,
+        had_cached_data: bool,
+    ) -> None:
+        self._feed_refreshing = True
+        self._feed_refresh_status = "Checking for new episodes..."
+        if had_cached_data:
+            self._render_show_episodes(self.selected_show or show)
+        else:
+            safe_update(self)
+        threading.Thread(
+            target=self._feed_refresh_worker,
+            args=(show, request_id, had_cached_data),
+            daemon=True,
+        ).start()
 
-        def fetch_worker():
-            try:
-                detailed_show = self.provider.parse_feed(show.feed_url)
-            except Exception:
-                detailed_show = None
+    def _feed_refresh_worker(
+        self,
+        show: PodcastShow,
+        request_id: int,
+        had_cached_data: bool,
+    ) -> None:
+        try:
+            detailed_show = self.provider.parse_feed(show.feed_url)
+            if not detailed_show or not detailed_show.episodes:
+                raise ValueError("The feed contains no playable episodes.")
+            self.cache.store_feed(detailed_show)
+            error = None
+        except Exception as exc:
+            logger.warning("Podcast feed refresh failed for %r: %s", show.feed_url, exc)
+            detailed_show = None
+            error = str(exc)
 
-            # Ignore result if the user navigated away/canceled
-            if self._active_load_id != current_load_id:
-                return
+        async def apply_feed() -> None:
+            self._apply_feed_refresh(
+                show,
+                request_id,
+                detailed_show,
+                error,
+                had_cached_data,
+            )
 
-            if hasattr(self.app_page, "run_task") and callable(self.app_page.run_task):
-                async def _apply():
-                    on_fetch_completed(detailed_show)
-                self.app_page.run_task(_apply)
-            else:
-                on_fetch_completed(detailed_show)
+        self.app_page.run_task(apply_feed)
 
-        thread = threading.Thread(target=fetch_worker, daemon=True)
-        thread.start()
+    def _apply_feed_refresh(
+        self,
+        requested_show: PodcastShow,
+        request_id: int,
+        detailed_show: Optional[PodcastShow],
+        error: Optional[str],
+        had_cached_data: bool,
+    ) -> None:
+        if request_id != self._active_load_id:
+            return
+        self._feed_refreshing = False
+        self._feed_refresh_status = None
+        if detailed_show is not None:
+            self._feed_refresh_error = None
+            self.selected_show = detailed_show
+            self._render_show_episodes(detailed_show)
+        elif had_cached_data and self.selected_show:
+            self._feed_refresh_error = "Could not check for updates; showing saved episodes."
+            self._render_show_episodes(self.selected_show)
+        else:
+            logger.error("Unable to load podcast feed %r: %s", requested_show.feed_url, error)
+            self._feed_refresh_error = None
+            self._render_load_error(requested_show)
 
     def _render_load_error(self, show: PodcastShow) -> None:
         """Renders an error screen when the podcast feed could not be loaded."""
         self._current_screen = "error"
+        self.content_area.scroll = ft.ScrollMode.AUTO
 
         error_card = ft.Container(
             bgcolor=self._mt.surface_color,
@@ -402,6 +541,10 @@ class PodcastsView(ft.Container):
 
     def _render_show_episodes(self, show: PodcastShow) -> None:
         self._current_screen = "details"
+        self.selected_show = show
+        self._episode_render_id += 1
+        render_id = self._episode_render_id
+        self.content_area.scroll = None
         back_btn = ft.TextButton("Back", icon=ft.Icons.ARROW_BACK, on_click=lambda e: self._navigate_back())
 
         is_sub = self._is_subscribed(show.feed_url)
@@ -410,6 +553,12 @@ class PodcastsView(ft.Container):
             icon=ft.Icons.CHECK if is_sub else ft.Icons.ADD,
         )
         sub_btn.on_click = lambda e: self._toggle_subscription(show, sub_btn)
+        refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH,
+            tooltip="Refresh podcast episodes",
+            disabled=self._feed_refreshing,
+            on_click=lambda e, s=show: self._open_show_details(s, force_refresh=True),
+        )
 
         header = ft.Row(
             spacing=16,
@@ -423,64 +572,184 @@ class PodcastsView(ft.Container):
                         ft.Text(show.title, size=20, weight=ft.FontWeight.BOLD),
                         ft.Text(show.author, size=13, color=self._mt.text_secondary),
                         ft.Text(f"{len(show.episodes)} episodes available", size=12, color=ft.Colors.GREY_400),
-                        ft.Container(content=sub_btn, padding=ft.Padding.only(top=6))
+                        ft.Row(
+                            spacing=4,
+                            controls=[sub_btn, refresh_btn],
+                        ),
+                        ft.Text(
+                            self._feed_refresh_status or self._feed_refresh_error or "",
+                            size=11,
+                            color=self._mt.text_secondary,
+                            visible=bool(self._feed_refresh_status or self._feed_refresh_error),
+                        ),
                     ]
                 )
             ]
         )
 
         episodes_list = ft.ListView(spacing=8, expand=True)
-        for ep in show.episodes:
-            # Format duration display for the list item
-            dur_str = ""
-            if ep.duration > 0:
-                hours = int(ep.duration // 3600)
-                mins = int((ep.duration % 3600) // 60)
-                secs = int(ep.duration % 60)
-                dur_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}:{secs:02d}"
-
-            ep_row = ft.Container(
-                bgcolor=self._mt.surface_color,
-                border=ft.Border.all(1, self._mt.border_color),
-                padding=12,
-                border_radius=4,
-                ink=True,
-                tooltip="Click to view episode details",
-                on_click=lambda e, ep_obj=ep, s=show: self._open_episode_details(ep_obj, s),
-                content=ft.Row(
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[
-                        ft.IconButton(
-                            icon=ft.Icons.PLAY_CIRCLE_FILL,
-                            icon_color=self._mt.current_accent,
-                            icon_size=34,
-                            tooltip="Play Episode",
-                            on_click=lambda e, ep_obj=ep: self.on_play_episode(ep_obj, show)
-                        ),
-                        ft.Column(
-                            spacing=3,
-                            expand=True,
-                            controls=[
-                                ft.Text(ep.title, size=14, weight=ft.FontWeight.W_600, no_wrap=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Text(self._clean_html_text(ep.description)[:130] + "..." if len(self._clean_html_text(ep.description)) > 130 else self._clean_html_text(ep.description), size=12, color=self._mt.text_secondary, max_lines=2),
-                            ]
-                        ),
-                        ft.Column(
-                            horizontal_alignment=ft.CrossAxisAlignment.END,
-                            spacing=4,
-                            controls=[
-                                ft.Text(dur_str, size=11, color=ft.Colors.GREY_400) if dur_str else ft.Container(),
-                                ft.Icon(ft.Icons.CHEVRON_RIGHT, size=18, color=self._mt.text_secondary)
-                            ]
-                        )
-                    ]
-                )
+        episodes_list.controls.extend([back_btn, header, ft.Divider(height=1)])
+        ordered_episodes = sorted(
+            show.episodes,
+            key=lambda episode: (
+                episode.published_at is not None,
+                episode.published_at if episode.published_at is not None else 0,
+            ),
+            reverse=True,
+        )
+        initial_episodes = ordered_episodes[:INITIAL_EPISODE_BATCH_SIZE]
+        episodes_list.controls.extend(
+            self._build_episode_row(episode, show)
+            for episode in initial_episodes
+        )
+        self._episode_render_episodes = ordered_episodes
+        self._episode_render_offset = len(initial_episodes)
+        self._episode_batch_loading = False
+        if len(initial_episodes) < len(ordered_episodes):
+            episodes_list.on_scroll = lambda event: self._on_episode_list_scroll(
+                event, show, render_id, episodes_list
             )
-            episodes_list.controls.append(ep_row)
 
-        self.content_area.controls = [back_btn, header, ft.Divider(height=1), episodes_list]
+        self.content_area.controls = [episodes_list]
         safe_update(self)
+
+    def _build_episode_row(self, episode: Episode, show: PodcastShow) -> ft.Container:
+        description = self._clean_html_text(episode.description)
+        if len(description) > 130:
+            description = description[:130] + "..."
+
+        duration_label = ""
+        if episode.duration > 0:
+            hours = int(episode.duration // 3600)
+            minutes = int((episode.duration % 3600) // 60)
+            seconds = int(episode.duration % 60)
+            duration_label = (
+                f"{hours}h {minutes}m" if hours > 0 else f"{minutes}:{seconds:02d}"
+            )
+
+        return ft.Container(
+            bgcolor=self._mt.surface_color,
+            border=ft.Border.all(1, self._mt.border_color),
+            padding=12,
+            border_radius=4,
+            ink=True,
+            tooltip="Click to view episode details",
+            on_click=lambda e, ep=episode, selected_show=show: self._open_episode_details(
+                ep, selected_show
+            ),
+            content=ft.Row(
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.IconButton(
+                        icon=ft.Icons.PLAY_CIRCLE_FILL,
+                        icon_color=self._mt.current_accent,
+                        icon_size=34,
+                        tooltip="Play Episode",
+                        on_click=lambda e, ep=episode, selected_show=show: self.on_play_episode(
+                            ep, selected_show
+                        ),
+                    ),
+                    ft.Column(
+                        spacing=3,
+                        expand=True,
+                        controls=[
+                            ft.Text(
+                                episode.title,
+                                size=14,
+                                weight=ft.FontWeight.W_600,
+                                no_wrap=True,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ft.Text(
+                                description,
+                                size=12,
+                                color=self._mt.text_secondary,
+                                max_lines=2,
+                            ),
+                        ],
+                    ),
+                    ft.Column(
+                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                        spacing=4,
+                        controls=[
+                            ft.Text(
+                                duration_label,
+                                size=11,
+                                color=ft.Colors.GREY_400,
+                            ) if duration_label else ft.Container(),
+                            ft.Icon(
+                                ft.Icons.CHEVRON_RIGHT,
+                                size=18,
+                                color=self._mt.text_secondary,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        )
+
+    def _on_episode_list_scroll(
+        self,
+        event: ft.OnScrollEvent,
+        show: PodcastShow,
+        render_id: int,
+        episodes_list: ft.ListView,
+    ) -> None:
+        if (
+            render_id != self._episode_render_id
+            or self._current_screen != "details"
+            or self.selected_show is None
+            or self.selected_show.feed_url != show.feed_url
+            or self._episode_batch_loading
+            or self._episode_render_offset >= len(self._episode_render_episodes)
+            or event.max_scroll_extent <= 0
+            or event.pixels < event.max_scroll_extent / 2
+        ):
+            return
+
+        self._episode_batch_loading = True
+        try:
+            self.app_page.run_task(
+                self._append_next_episode_batch,
+                show,
+                render_id,
+                episodes_list,
+            )
+        except Exception:
+            self._episode_batch_loading = False
+            raise
+
+    async def _append_next_episode_batch(
+        self,
+        show: PodcastShow,
+        render_id: int,
+        episodes_list: ft.ListView,
+    ) -> None:
+        try:
+            await asyncio.sleep(0)
+            if (
+                render_id != self._episode_render_id
+                or self._current_screen != "details"
+                or self.selected_show is None
+                or self.selected_show.feed_url != show.feed_url
+            ):
+                return
+
+            start = self._episode_render_offset
+            batch = self._episode_render_episodes[start:start + EPISODE_BATCH_SIZE]
+            if not batch:
+                return
+            episodes_list.controls.extend(
+                self._build_episode_row(episode, show)
+                for episode in batch
+            )
+            self._episode_render_offset += len(batch)
+            safe_update(self)
+        finally:
+            if render_id == self._episode_render_id:
+                self._episode_batch_loading = False
 
     def _clean_html_text(self, raw_html: str) -> str:
         """Strips HTML tags and unescapes entities for clean readable descriptions."""
@@ -498,6 +767,10 @@ class PodcastsView(ft.Container):
 
     def _open_episode_details(self, episode: Episode, show: PodcastShow) -> None:
         """Opens dedicated page with episode description, duration, thumbnail, full title, and play button."""
+        self._active_load_id += 1
+        self._feed_refreshing = False
+        self._feed_refresh_status = None
+        self.content_area.scroll = ft.ScrollMode.AUTO
         self.selected_episode = episode
         self._current_screen = "episode_detail"
 

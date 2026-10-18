@@ -100,6 +100,20 @@ CREATE TABLE IF NOT EXISTS episodes (
     FOREIGN KEY(podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS podcast_search_cache (
+    query TEXT NOT NULL,
+    result_limit INTEGER NOT NULL,
+    fetched_at REAL NOT NULL,
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (query, result_limit)
+);
+
+CREATE TABLE IF NOT EXISTS podcast_feed_cache (
+    feed_url TEXT PRIMARY KEY,
+    fetched_at REAL NOT NULL,
+    data_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS radio_stations (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

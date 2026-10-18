@@ -16,28 +16,29 @@ class PodcastProvider:
         """Searches iTunes directory for podcasts."""
         url = "https://itunes.apple.com/search"
         params = {"term": term, "media": "podcast", "entity": "podcast", "limit": limit}
-        try:
-            resp = self.client.get(url, params=params)
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])
-                shows = []
-                for item in results:
-                    feed_url = item.get("feedUrl")
-                    if not feed_url:
-                        continue
-                    show_id = str(item.get("collectionId", ""))
-                    shows.append(PodcastShow(
-                        id=show_id,
-                        title=item.get("collectionName", "Unknown Podcast"),
-                        author=item.get("artistName", ""),
-                        description="",
-                        feed_url=feed_url,
-                        artwork_url=item.get("artworkUrl600") or item.get("artworkUrl100")
-                    ))
-                return shows
-        except Exception:
-            pass
-        return []
+        resp = self.client.get(url, params=params)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError("The podcast directory returned an invalid response.")
+        results = payload.get("results", [])
+        if not isinstance(results, list):
+            raise ValueError("The podcast directory response has invalid results.")
+        shows = []
+        for item in results:
+            feed_url = item.get("feedUrl")
+            if not feed_url:
+                continue
+            show_id = str(item.get("collectionId", ""))
+            shows.append(PodcastShow(
+                id=show_id,
+                title=item.get("collectionName", "Unknown Podcast"),
+                author=item.get("artistName", ""),
+                description="",
+                feed_url=feed_url,
+                artwork_url=item.get("artworkUrl600") or item.get("artworkUrl100")
+            ))
+        return shows
 
     def parse_feed(self, feed_url: str) -> Optional[PodcastShow]:
         """Parses an RSS feed and returns the PodcastShow with its episodes."""

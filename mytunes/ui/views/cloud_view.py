@@ -16,7 +16,8 @@ class CloudView(ft.Container):
         self,
         page: ft.Page,
         theme: MetroTheme,
-        sync_manager: SyncManager
+        sync_manager: SyncManager,
+        embedded: bool = False,
     ):
         super().__init__()
         self.app_page = page
@@ -24,8 +25,9 @@ class CloudView(ft.Container):
         self.sync_manager = sync_manager
         self.last_sync_time = "Never"
 
-        self.expand = True
-        self.padding = ft.Padding.all(28)
+        self._embedded = embedded
+        self.expand = not embedded
+        self.padding = ft.Padding.all(28) if not embedded else 0
 
         # File pickers for manual import/export (self-register as Services in Flet 1.0+)
         self.save_picker = ft.FilePicker(on_result=self._on_save_picked)
@@ -99,8 +101,8 @@ class CloudView(ft.Container):
         )
 
         self.content = ft.Column(
-            expand=True,
-            scroll=ft.ScrollMode.AUTO,
+            expand=not self._embedded,
+            scroll=None if self._embedded else ft.ScrollMode.AUTO,
             spacing=24,
             controls=[
                 ft.Column([title, subtitle], spacing=4),

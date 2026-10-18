@@ -19,13 +19,15 @@ class PlaylistsView(ft.Container):
         page: ft.Page,
         db_conn: sqlite3.Connection,
         theme: MetroTheme,
-        on_play_track: Callable[[Track, List[Track]], None]
+        on_play_track: Callable[[Track, List[Track]], None],
+        on_play_next: Optional[Callable[[Track], None]] = None,
     ):
         super().__init__()
         self.app_page = page
         self.conn = db_conn
         self._mt = theme
         self.on_play_track = on_play_track
+        self.on_play_next = on_play_next
 
         self.playlists: List[Playlist] = []
         self.selected_playlist: Optional[Playlist] = None
@@ -156,19 +158,34 @@ class PlaylistsView(ft.Container):
             )
         else:
             for t in self.playlist_tracks:
+                song_controls: list[ft.Control] = [
+                    ft.Icon(ft.Icons.MUSIC_NOTE, size=18, color=self._mt.text_secondary),
+                    ft.Column([
+                        ft.Text(t.title, size=13, weight=ft.FontWeight.BOLD),
+                        ft.Text(f"{t.artist} • {t.album}", size=11, color=self._mt.text_secondary)
+                    ], expand=True),
+                    ft.Text(t.formatted_duration, size=12, color=self._mt.text_secondary),
+                ]
+                if self.on_play_next:
+                    song_controls.append(
+                        ft.PopupMenuButton(
+                            icon=ft.Icons.MORE_VERT,
+                            tooltip="Song options",
+                            items=[
+                                ft.PopupMenuItem(
+                                    content="Play Next",
+                                    icon=ft.Icons.PLAY_ARROW,
+                                    on_click=lambda e, track=t: self.on_play_next(track),
+                                )
+                            ],
+                        )
+                    )
                 row = ft.Container(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                     border_radius=4,
                     ink=True,
                     on_click=lambda e, tr=t: self.on_play_track(tr, self.playlist_tracks),
-                    content=ft.Row([
-                        ft.Icon(ft.Icons.MUSIC_NOTE, size=18, color=self._mt.text_secondary),
-                        ft.Column([
-                            ft.Text(t.title, size=13, weight=ft.FontWeight.BOLD),
-                            ft.Text(f"{t.artist} • {t.album}", size=11, color=self._mt.text_secondary)
-                        ], expand=True),
-                        ft.Text(t.formatted_duration, size=12, color=self._mt.text_secondary),
-                    ], spacing=12)
+                    content=ft.Row(song_controls, spacing=12)
                 )
                 self.tracks_view.controls.append(row)
 

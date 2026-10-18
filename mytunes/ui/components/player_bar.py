@@ -5,6 +5,7 @@ from typing import Optional, Callable
 from mytunes.models.track import Track
 from mytunes.core.audio import AudioEngine
 from mytunes.core.queue import QueueManager, RepeatMode
+from mytunes.models.artist_credits import split_artist_credits
 from mytunes.ui.theme import MetroTheme
 import sqlite3
 
@@ -27,6 +28,8 @@ class PlayerBar(ft.Container):
         on_mix_click: Callable[[], None],
         on_queue_click: Callable[[], None],
         db_conn: Optional[sqlite3.Connection] = None,
+        on_artist_click: Optional[Callable[[str], None]] = None,
+        on_album_click: Optional[Callable[[str, str], None]] = None,
     ):
         super().__init__()
         self.app_page = page
@@ -40,11 +43,18 @@ class PlayerBar(ft.Container):
         self.on_sleep_click = on_sleep_click
         self.on_mix_click = on_mix_click
         self.on_queue_click = on_queue_click
+        self.on_artist_navigation = on_artist_click
+        self.on_album_navigation = on_album_click
 
         self.is_dragging_slider = False
 
         # UI Controls
         # Placeholder disc — shown when no artwork is loaded
+        self._placeholder_icon = ft.Icon(
+            ft.Icons.MUSIC_NOTE,
+            size=20,
+            color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
+        )
         _placeholder = ft.Container(
             width=54,
             height=54,
@@ -82,24 +92,32 @@ class PlayerBar(ft.Container):
                         width=54,
                         height=54,
                         alignment=ft.Alignment(0, 0),
-                        content=ft.Icon(
-                            ft.Icons.MUSIC_NOTE,
-                            size=20,
-                            color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
-                        ),
+                        content=self._placeholder_icon,
                     ),
                 ]
             ),
         )
 
+        self._artwork_error_icon = ft.Icon(
+            ft.Icons.MUSIC_NOTE,
+            size=20,
+            color=ft.Colors.with_opacity(0.45, ft.Colors.WHITE),
+        )
         # Actual artwork image — starts invisible, shown once src is set
         self.album_art_img = ft.Image(
-            src=None,
+            src="",
             width=54,
             height=54,
             fit=ft.BoxFit.COVER,
             border_radius=4,
             visible=False,
+            error_content=ft.Container(
+                width=54,
+                height=54,
+                bgcolor=self._mt.surface_variant,
+                alignment=ft.Alignment(0, 0),
+                content=self._artwork_error_icon,
+            ),
         )
 
         # Stack: placeholder behind, real art in front
@@ -121,13 +139,30 @@ class PlayerBar(ft.Container):
             overflow=ft.TextOverflow.ELLIPSIS,
         )
 
-        self.track_artist = ft.Text(
+        self.track_artist_label = ft.Text(
             "—",
             size=12,
             color=self._mt.text_secondary,
             no_wrap=True,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self.track_artist = ft.TextButton(
+            content=self.track_artist_label,
+            style=ft.ButtonStyle(padding=0),
+            tooltip="Open artist in Music",
+            on_click=self._on_artist_click,
+        )
+        self.collaborator_links = ft.Row(spacing=0, tight=True)
+        self.track_album_label = ft.Text(
+            "",
+            size=12,
+            color=self._mt.text_secondary,
+            no_wrap=True,
+        )
+        self.track_album = ft.TextButton(
+            content=self.track_album_label,
+            style=ft.ButtonStyle(padding=0),
+            tooltip="Open album in Music",
+            on_click=self._on_album_click,
         )
 
         self.fav_button = ft.IconButton(
@@ -238,8 +273,9 @@ class PlayerBar(ft.Container):
         # Podcast speed options: x1.0, x1.25, x1.50, x1.75, x2.0
         self.playback_rates = [1.0, 1.25, 1.5, 1.75, 2.0]
         self.current_rate_index = 0
+        self.speed_label = ft.Text("1x")
         self.btn_speed = ft.TextButton(
-            "1x",
+            content=self.speed_label,
             tooltip="Playback Speed",
             visible=False,
             style=ft.ButtonStyle(
@@ -268,7 +304,23 @@ class PlayerBar(ft.Container):
         track_info_col = ft.Column(
             spacing=2,
             alignment=ft.MainAxisAlignment.CENTER,
-            controls=[self.track_title, self.track_artist],
+            controls=[
+                self.track_title,
+                ft.Row(
+                    width=200,
+                    scroll=ft.ScrollMode.AUTO,
+                    spacing=4,
+                    controls=[
+                        ft.Row(
+                            spacing=0,
+                            tight=True,
+                            controls=[self.track_artist, self.collaborator_links],
+                        ),
+                        ft.Text("—", size=12, color=self._mt.text_secondary),
+                        self.track_album,
+                    ],
+                ),
+            ],
             width=200
         )
 
@@ -328,14 +380,20 @@ class PlayerBar(ft.Container):
     def _hide_artwork(self) -> None:
         """Hide the real artwork and reveal the placeholder disc."""
         self.album_art_img.visible = False
-        self.album_art_img.src = None
+        self.album_art_img.src = ""
         self._album_art_placeholder.visible = True
 
     def update_track(self, track: Optional[Track]) -> None:
         """Updates track information and extracts dynamic accent color."""
         if not track:
+            self._placeholder_icon.icon = ft.Icons.MUSIC_NOTE
+            self._artwork_error_icon.icon = ft.Icons.MUSIC_NOTE
             self.track_title.value = "No track playing"
-            self.track_artist.value = "—"
+            self.track_artist_label.value = "—"
+            self.collaborator_links.controls.clear()
+            self.track_album_label.value = ""
+            self.track_artist.disabled = True
+            self.track_album.disabled = True
             self._hide_artwork()
 
             self.fav_button.icon = ft.Icons.FAVORITE_BORDER
@@ -347,8 +405,39 @@ class PlayerBar(ft.Container):
             safe_update(self)
             return
 
+        is_radio = track.id.startswith("radio_")
+        fallback_icon = ft.Icons.RADIO if is_radio else ft.Icons.MUSIC_NOTE
+        self._placeholder_icon.icon = fallback_icon
+        self._artwork_error_icon.icon = fallback_icon
+
         self.track_title.value = track.title
-        self.track_artist.value = f"{track.artist} — {track.album}"
+        artist_names = split_artist_credits(track.artist) or ["Unknown Artist"]
+        self.track_artist_label.value = artist_names[0]
+        self.collaborator_links.controls = []
+        for artist_name in artist_names[1:]:
+            self.collaborator_links.controls.extend([
+                ft.Text(", ", size=12, color=self._mt.text_secondary),
+                ft.TextButton(
+                    content=ft.Text(
+                        artist_name,
+                        size=12,
+                        color=self._mt.text_secondary,
+                        no_wrap=True,
+                    ),
+                    style=ft.ButtonStyle(padding=0),
+                    tooltip=f"Open {artist_name} in Music",
+                    on_click=lambda e, name=artist_name: self._on_artist_click(e, name),
+                ),
+            ])
+        self.track_album_label.value = track.album or "Unknown Album"
+        can_navigate_to_music = not (is_radio or track.id.startswith("pod_"))
+        self.track_artist.disabled = not can_navigate_to_music or self.on_artist_navigation is None
+        for collaborator_link in self.collaborator_links.controls:
+            if isinstance(collaborator_link, ft.TextButton):
+                collaborator_link.disabled = (
+                    not can_navigate_to_music or self.on_artist_navigation is None
+                )
+        self.track_album.disabled = not can_navigate_to_music or self.on_album_navigation is None
         self.fav_button.icon = ft.Icons.FAVORITE if track.is_favorite else ft.Icons.FAVORITE_BORDER
         self.fav_button.icon_color = ft.Colors.RED_400 if track.is_favorite else ft.Colors.GREY_400
 
@@ -371,7 +460,6 @@ class PlayerBar(ft.Container):
         # - Radio stream (id starts with "radio_"): hide lyrics/speed, hide progress bar
         # - Podcast episode (id starts with "pod_"): show speed button (x1.0..x2.0), hide lyrics, show progress bar
         # - Music / other: show lyrics button, hide speed button, show progress bar
-        is_radio = track.id.startswith("radio_")
         is_podcast = track.id.startswith("pod_")
 
         if is_radio:
@@ -411,9 +499,7 @@ class PlayerBar(ft.Container):
         self.audio.set_playback_rate(rate)
         # Format text, e.g. "1x", "1.25x", "1.5x", "1.75x", "2x"
         rate_str = f"{rate:g}x"
-        self.btn_speed.text = rate_str
-        if hasattr(self.btn_speed, "content") and isinstance(self.btn_speed.content, ft.Text):
-            self.btn_speed.content.value = rate_str
+        self.speed_label.value = rate_str
         safe_update(self)
 
     def update_playback_state(self, is_playing: bool) -> None:
@@ -457,6 +543,25 @@ class PlayerBar(ft.Container):
         next_track = self.queue.next_track()
         if next_track:
             self.audio.play_track(next_track)
+
+    def _on_artist_click(self, e, artist_name: Optional[str] = None) -> None:
+        track = self.queue.current_track
+        if track and self.on_artist_navigation:
+            artists = split_artist_credits(track.artist)
+            target_artist = artist_name or (artists[0] if artists else track.artist)
+            self.on_artist_navigation(target_artist)
+
+    def _on_album_click(self, e) -> None:
+        track = self.queue.current_track
+        if track and self.on_album_navigation:
+            album_artists = split_artist_credits(track.album_artist)
+            track_artists = split_artist_credits(track.artist)
+            album_artist = (
+                album_artists[0]
+                if album_artists
+                else track_artists[0] if track_artists else track.artist
+            )
+            self.on_album_navigation(track.album, album_artist)
 
     def _on_slider_start(self, e) -> None:
         self.is_dragging_slider = True

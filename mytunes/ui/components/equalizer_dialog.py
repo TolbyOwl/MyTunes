@@ -65,7 +65,7 @@ class EqualizerDialog:
             value=self.current_preset,
             options=[ft.dropdown.Option(name) for name in EQ_PRESETS.keys()],
             width=200,
-            on_change=self._on_preset_change
+            on_select=self._on_preset_change
         )
 
         reset_btn = ft.TextButton("Reset to Flat", on_click=lambda e: self._apply_preset("Flat"))

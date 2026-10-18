@@ -167,6 +167,8 @@ AudioControl = _VLCPlayer
 from mytunes.models.track import Track
 from mytunes.core.queue import QueueManager, RepeatMode
 
+logger = logging.getLogger(__name__)
+
 class SleepTimerState:
     """Tracks sleep timer countdown and finish-song state."""
     def __init__(self):
@@ -202,7 +204,10 @@ class AudioEngine:
 
         # Callbacks for UI updates
         self.on_state_changed: Optional[Callable[[bool], None]] = None
+        self.on_stopped: Optional[Callable[[], None]] = None
+        self.on_volume_changed: Optional[Callable[[float], None]] = None
         self.on_position_changed: Optional[Callable[[float, float], None]] = None
+        self.on_seeked: Optional[Callable[[float], None]] = None
         self.on_sleep_tick: Optional[Callable[[int, bool], None]] = None
         self.on_sleep_triggered: Optional[Callable[[], None]] = None
 
@@ -225,7 +230,7 @@ class AudioEngine:
                 try:
                     ev = self.audio.player.event_manager()
                     ev.event_attach(vlc.EventType.MediaPlayerEndReached,
-                                    lambda e: self._handle_track_finished())
+                                    self._on_vlc_track_finished)
                 except Exception:
                     pass
         else:
@@ -299,10 +304,26 @@ class AudioEngine:
             self.is_playing = True
             if self.on_state_changed:
                 self.on_state_changed(True)
-        elif "paused" in state_str or "stopped" in state_str:
+        elif "paused" in state_str:
             self.is_playing = False
             if self.on_state_changed:
                 self.on_state_changed(False)
+        elif "stopped" in state_str:
+            self._notify_stopped()
+
+    def _notify_stopped(self) -> None:
+        self.is_playing = False
+        if self.on_state_changed:
+            self.on_state_changed(False)
+        if self.on_stopped:
+            self.on_stopped()
+
+    def _on_vlc_track_finished(self, _event: Any) -> None:
+        """Dispatch VLC's native-thread callback to the page event loop."""
+        self.app_page.run_task(self._handle_track_finished_on_page)
+
+    async def _handle_track_finished_on_page(self) -> None:
+        self._handle_track_finished()
 
     def _on_seek_complete(self, e=None) -> None:
         pass
@@ -322,11 +343,9 @@ class AudioEngine:
         if next_track:
             self.play_track(next_track)
         else:
-            self.is_playing = False
-            if self.on_state_changed:
-                self.on_state_changed(False)
+            self._notify_stopped()
 
-    def play_track(self, track: Track) -> None:
+    def play_track(self, track: Track, *, count_play: bool = True) -> None:
         """Loads and plays a track."""
         if not self.audio:
             return
@@ -352,12 +371,48 @@ class AudioEngine:
         # Start polling VLC position so the progress bar updates
         self._start_poll()
 
-        track.play_count += 1
-        track.last_played = time.time()
+        if count_play:
+            track.play_count += 1
+            track.last_played = time.time()
 
         if self.on_state_changed:
             self.on_state_changed(True)
         self.app_page.update()
+
+    def restore_paused_track(self, track: Track, position_seconds: float) -> None:
+        """Loads a saved track, leaves it paused, and seeks once VLC has media metadata."""
+        if not self.audio:
+            return
+
+        self.play_track(track, count_play=False)
+        self.pause()
+        self.current_position = max(0.0, position_seconds)
+        self._run_async(self._seek_after_restore_load, self.current_position, track.duration)
+
+    async def _seek_after_restore_load(
+        self,
+        position_seconds: float,
+        fallback_duration: float,
+    ) -> None:
+        for _ in range(50):
+            if not self.audio:
+                return
+            has_duration_api = hasattr(self.audio, "get_duration")
+            duration = (
+                self.audio.get_duration()
+                if has_duration_api
+                else self.total_duration or fallback_duration
+            )
+            if duration > 0:
+                target = min(position_seconds, max(0.0, duration - 0.1))
+                self.seek(target)
+                self.pause()
+                if self.on_position_changed:
+                    self.on_position_changed(target, duration)
+                return
+            await asyncio.sleep(0.1)
+
+        logger.warning("Could not seek to the saved position because track duration did not load.")
 
     # --- Position polling (drives progress bar for VLC backend) ---
 
@@ -433,26 +488,31 @@ class AudioEngine:
             self.is_playing = False
             self._stop_poll()
             self.current_position = 0.0
-            if self.on_state_changed:
-                self.on_state_changed(False)
+            self._notify_stopped()
             self.app_page.update()
 
     def seek(self, position_seconds: float) -> None:
         if self.audio:
             self.audio.seek(int(position_seconds * 1000))
             self.current_position = position_seconds
+            if self.on_seeked:
+                self.on_seeked(position_seconds)
 
     def set_volume(self, vol: float) -> None:
         self.volume = max(0.0, min(1.0, vol))
         if self.audio and not self.is_muted:
             self.audio.volume = self.volume
             self.app_page.update()
+        if self.on_volume_changed:
+            self.on_volume_changed(0.0 if self.is_muted else self.volume)
 
     def toggle_mute(self) -> None:
         self.is_muted = not self.is_muted
         if self.audio:
             self.audio.volume = 0.0 if self.is_muted else self.volume
             self.app_page.update()
+        if self.on_volume_changed:
+            self.on_volume_changed(0.0 if self.is_muted else self.volume)
 
     def set_playback_rate(self, rate: float) -> None:
         self.playback_rate = max(0.5, min(2.5, rate))
