@@ -271,11 +271,15 @@ class PodcastsView(ft.Container):
         self.content_area.scroll = ft.ScrollMode.AUTO
         self.content_area.controls.clear()
 
-        back_to_subs_btn = ft.TextButton("← My Subscriptions", on_click=lambda e: self.load_subscriptions())
-        header = ft.Row([
-            ft.Text(f"Search Results ({len(self.search_results)} podcasts)", size=16, weight=ft.FontWeight.BOLD),
-            back_to_subs_btn
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+        back_to_subs_btn = self._build_back_button(
+            "My Subscriptions",
+            lambda e: self.load_subscriptions(),
+        )
+        header = ft.Text(
+            f"Search Results ({len(self.search_results)} podcasts)",
+            size=16,
+            weight=ft.FontWeight.BOLD,
+        )
 
         if not self.search_results:
             message = (
@@ -284,6 +288,7 @@ class PodcastsView(ft.Container):
                 else "No podcasts found."
             )
             self.content_area.controls.extend([
+                back_to_subs_btn,
                 header,
                 ft.Container(alignment=ft.Alignment.CENTER, content=ft.Text(message, color=self._mt.text_secondary))
             ])
@@ -301,7 +306,7 @@ class PodcastsView(ft.Container):
         for show in self.search_results:
             results_grid.controls.append(self._build_show_card(show))
 
-        controls: list[ft.Control] = [header]
+        controls: list[ft.Control] = [back_to_subs_btn, header]
         if self._search_error:
             controls.append(
                 ft.Text("Showing saved results; the directory could not be refreshed.", color=self._mt.text_secondary, size=12)
@@ -361,6 +366,18 @@ class PodcastsView(ft.Container):
         else:
             self.load_subscriptions()
 
+    @staticmethod
+    def _build_back_button(label: str, on_click: Callable) -> ft.Container:
+        return ft.Container(
+            alignment=ft.Alignment(-1.0, -1.0),
+            padding=ft.Padding.only(bottom=4),
+            content=ft.TextButton(
+                label,
+                icon=ft.Icons.ARROW_BACK,
+                on_click=on_click,
+            ),
+        )
+
     def _open_show_details(self, show: PodcastShow, force_refresh: bool = False) -> None:
         """Displays cached feed data immediately and refreshes it when stale or requested."""
         self._active_load_id += 1
@@ -397,17 +414,13 @@ class PodcastsView(ft.Container):
                     ft.Text(f"by {show.author}" if show.author else "Connecting to RSS feed...", size=13, color=self._mt.text_secondary, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                     ft.Text("Fetching feed and extracting audio episodes from the server. This may take a few moments.", size=12, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
                     ft.Container(height=8),
-                    ft.OutlinedButton(
-                        "Cancel / Back",
-                        icon=ft.Icons.ARROW_BACK,
-                        on_click=lambda e: self._navigate_back()
-                    )
                 ]
             )
         )
-        back_top_btn = ft.Row([
-            ft.TextButton("Back", icon=ft.Icons.ARROW_BACK, on_click=lambda e: self._navigate_back())
-        ])
+        back_top_btn = self._build_back_button(
+            "Back",
+            lambda e: self._navigate_back(),
+        )
         self.content_area.controls = [
             back_top_btn,
             ft.Container(
@@ -530,29 +543,19 @@ class PodcastsView(ft.Container):
                         text_align=ft.TextAlign.CENTER
                     ),
                     ft.Container(height=8),
-                    ft.Row(
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        spacing=12,
-                        controls=[
-                            ft.OutlinedButton(
-                                "Back to Podcasts",
-                                icon=ft.Icons.ARROW_BACK,
-                                on_click=lambda e: self._navigate_back()
-                            ),
-                            ft.FilledButton(
-                                "Try Again",
-                                icon=ft.Icons.REFRESH,
-                                on_click=lambda e, s=show: self._open_show_details(s)
-                            )
-                        ]
+                    ft.FilledButton(
+                        "Try Again",
+                        icon=ft.Icons.REFRESH,
+                        on_click=lambda e, s=show: self._open_show_details(s)
                     )
                 ]
             )
         )
 
-        back_top_btn = ft.Row([
-            ft.TextButton("Back", icon=ft.Icons.ARROW_BACK, on_click=lambda e: self._navigate_back())
-        ])
+        back_top_btn = self._build_back_button(
+            "Back",
+            lambda e: self._navigate_back(),
+        )
 
         self.content_area.controls = [
             back_top_btn,
@@ -570,7 +573,10 @@ class PodcastsView(ft.Container):
         self._episode_render_id += 1
         render_id = self._episode_render_id
         self.content_area.scroll = None
-        back_btn = ft.TextButton("Back", icon=ft.Icons.ARROW_BACK, on_click=lambda e: self._navigate_back())
+        back_btn = self._build_back_button(
+            "Back",
+            lambda e: self._navigate_back(),
+        )
 
         is_sub = self._is_subscribed(show.feed_url)
         sub_btn = ft.FilledButton(
@@ -613,7 +619,37 @@ class PodcastsView(ft.Container):
         )
 
         episodes_list = ft.ListView(spacing=8, expand=True)
-        episodes_list.controls.extend([back_btn, header, ft.Divider(height=1)])
+        show_description = self._clean_html_text(show.description)
+        show_description_card = (
+            ft.Container(
+                bgcolor=self._mt.surface_color,
+                border=ft.Border.all(1, self._mt.border_color),
+                padding=16,
+                content=ft.Column(
+                    spacing=8,
+                    controls=[
+                        ft.Text(
+                            "ABOUT THIS PODCAST",
+                            size=12,
+                            weight=ft.FontWeight.BOLD,
+                            color=self._mt.current_accent,
+                        ),
+                        ft.Text(
+                            show_description,
+                            size=13,
+                            color=self._mt.text_secondary,
+                            selectable=True,
+                        ),
+                    ],
+                ),
+            )
+            if show_description
+            else None
+        )
+        episodes_list.controls.extend([back_btn, header])
+        if show_description_card is not None:
+            episodes_list.controls.append(show_description_card)
+        episodes_list.controls.append(ft.Divider(height=1))
         ordered_episodes = sorted(
             show.episodes,
             key=lambda episode: (
@@ -977,10 +1013,9 @@ class PodcastsView(ft.Container):
         self.selected_episode = episode
         self._current_screen = "episode_detail"
 
-        back_btn = ft.TextButton(
+        back_btn = self._build_back_button(
             "Back",
-            icon=ft.Icons.ARROW_BACK,
-            on_click=lambda e: self._navigate_back()
+            lambda e: self._navigate_back(),
         )
 
         # Duration formatting

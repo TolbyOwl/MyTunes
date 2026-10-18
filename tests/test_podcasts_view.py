@@ -196,6 +196,36 @@ class TestPodcastEpisodeRendering(unittest.TestCase):
         self.assertEqual(next_track.source, "stream")
         self.assertEqual(queued_track.id, next_track.id)
 
+    def test_search_return_button_matches_top_left_back_button_style(self):
+        self.view.search_results = [self.show]
+
+        self.view._render_search_results()
+
+        back_container = self.view.content_area.controls[0]
+        self.assertIsInstance(back_container, ft.Container)
+        self.assertEqual(back_container.alignment, ft.Alignment(-1.0, -1.0))
+        back_button = back_container.content
+        self.assertIsInstance(back_button, ft.TextButton)
+        self.assertEqual(back_button.content, "My Subscriptions")
+        self.assertEqual(back_button.icon, ft.Icons.ARROW_BACK)
+
+    def test_podcast_page_shows_cleaned_description_below_header(self):
+        self.show.description = "<p>A show about music &amp; technology.</p>"
+
+        self.view._render_show_episodes(self.show)
+
+        episodes_list = self._rendered_episodes_list()
+        back_container = episodes_list.controls[0]
+        self.assertIsInstance(back_container, ft.Container)
+        self.assertEqual(back_container.alignment, ft.Alignment(-1.0, -1.0))
+        description_card = episodes_list.controls[2]
+        self.assertIsInstance(description_card, ft.Container)
+        description_text = description_card.content.controls[1]
+        self.assertEqual(
+            description_text.value,
+            "A show about music & technology.",
+        )
+
     def test_episode_download_can_be_deleted_from_the_menu(self):
         episode = self.show.episodes[0]
         episode.audio_url = "https://example.com/audio.mp3"
