@@ -1,6 +1,8 @@
 import asyncio
+import os
+import tempfile
 import unittest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import flet as ft
 from mytunes.models.podcast import Episode, PodcastShow
@@ -18,11 +20,15 @@ class TestPodcastEpisodeRendering(unittest.TestCase):
     def setUp(self):
         self.conn = init_db(":memory:")
         self.page = MagicMock()
+        self.on_play_next = Mock()
+        self.on_add_queue = Mock()
         self.view = PodcastsView(
             self.page,
             self.conn,
             MetroTheme(),
             Mock(),
+            self.on_play_next,
+            self.on_add_queue,
         )
         self.show = PodcastShow(
             id="show",
@@ -169,6 +175,59 @@ class TestPodcastEpisodeRendering(unittest.TestCase):
         episodes_list = self._rendered_episodes_list()
         self.assertIsNone(episodes_list.on_scroll)
         self.page.run_task.assert_not_called()
+
+    def test_episode_menu_queues_episode_as_track(self):
+        self.view._render_show_episodes(self.show)
+        episode_row = self._rendered_episodes_list().controls[3]
+        episode_menu = episode_row.content.controls[-1]
+
+        self.assertIsInstance(episode_menu, ft.PopupMenuButton)
+        self.assertEqual(
+            [item.content for item in episode_menu.items],
+            ["Play Next", "Add to Queue", "Download Episode"],
+        )
+        episode_menu.items[0].on_click(None)
+        episode_menu.items[1].on_click(None)
+
+        next_track = self.on_play_next.call_args.args[0]
+        queued_track = self.on_add_queue.call_args.args[0]
+        self.assertEqual(next_track.id, f"pod_{self.show.episodes[-1].id}")
+        self.assertEqual(next_track.file_path, self.show.episodes[-1].audio_url)
+        self.assertEqual(next_track.source, "stream")
+        self.assertEqual(queued_track.id, next_track.id)
+
+    def test_episode_download_can_be_deleted_from_the_menu(self):
+        episode = self.show.episodes[0]
+        episode.audio_url = "https://example.com/audio.mp3"
+        with tempfile.TemporaryDirectory() as offline_dir:
+            download_path = os.path.join(
+                offline_dir,
+                f"Episode 0_{self.view._download_episode_id(episode)}.mp3",
+            )
+            with open(download_path, "wb") as download:
+                download.write(b"audio")
+
+            self.view._audio_cache = Mock()
+            self.view._audio_cache.download_for_offline.return_value = download_path
+            self.page.run_task.side_effect = lambda task: asyncio.run(task())
+            row = self.view._build_episode_row(episode, self.show)
+            download_item = row.content.controls[-1].items[-1]
+
+            with (
+                patch("mytunes.ui.views.podcasts_view.OFFLINE_DIR", offline_dir),
+                patch("mytunes.ui.views.podcasts_view.threading.Thread") as thread,
+            ):
+                self.view._start_episode_download(episode, self.show, download_item)
+                thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
+
+                self.assertTrue(episode.is_downloaded)
+                self.assertEqual(download_item.content, "Delete Download")
+                self.assertTrue(os.path.isfile(download_path))
+                download_item.on_click(None)
+
+            self.assertFalse(episode.is_downloaded)
+            self.assertFalse(os.path.exists(download_path))
+            self.assertEqual(download_item.content, "Download Episode")
 
     def test_restores_outer_scroll_when_returning_to_subscriptions(self):
         self.view._render_show_episodes(self.show)

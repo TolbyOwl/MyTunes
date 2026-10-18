@@ -118,7 +118,9 @@ class TestPodcastCache(unittest.TestCase):
         selected_show = view.selected_show
         assert selected_show is not None
         self.assertEqual(selected_show.title, show.title)
-        header = view.content_area.controls[1]
+        episodes_list = view.content_area.controls[0]
+        assert isinstance(episodes_list, ft.ListView)
+        header = episodes_list.controls[1]
         assert isinstance(header, ft.Row)
         metadata = header.controls[1]
         assert isinstance(metadata, ft.Column)

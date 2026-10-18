@@ -170,13 +170,19 @@ def main(page: ft.Page) -> None:
         audio_engine.play_track(stream_track)
 
     def play_podcast_episode(episode: Episode, show: PodcastShow) -> None:
+        downloaded_path = (
+            episode.download_path
+            if episode.download_path and os.path.isfile(episode.download_path)
+            else None
+        )
         podcast_track = Track(
             id=f"pod_{episode.id}",
             title=episode.title,
             artist=show.author or show.title,
             album=show.title,
-            file_path=episode.audio_url,
-            source="stream",
+            duration=episode.duration,
+            file_path=downloaded_path or episode.audio_url,
+            source="local" if downloaded_path else "stream",
             artwork_url=show.artwork_url
         )
         queue_manager.set_queue([podcast_track], 0)
@@ -312,7 +318,14 @@ def main(page: ft.Page) -> None:
     # 6. Instantiate Views
     view_music = MusicView(page, local_provider, theme, play_track, play_next, add_to_queue)
     cloud_settings = CloudView(page, theme, sync_manager, embedded=True)
-    view_podcasts = PodcastsView(page, db_conn, theme, play_podcast_episode)
+    view_podcasts = PodcastsView(
+        page,
+        db_conn,
+        theme,
+        play_podcast_episode,
+        play_next,
+        add_to_queue,
+    )
     view_radio = RadioView(page, theme, play_radio_station, db_conn=db_conn)
     view_playlists = PlaylistsView(page, db_conn, theme, play_track, play_next)
     view_settings = SettingsView(

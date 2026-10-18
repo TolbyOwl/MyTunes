@@ -6,8 +6,12 @@ import sqlite3
 import re
 import html
 import logging
+import hashlib
+import os
 from typing import List, Callable, Optional
 from mytunes.models.podcast import PodcastShow, Episode
+from mytunes.models.track import Track
+from mytunes.cache import CacheManager, OFFLINE_DIR
 from mytunes.providers.podcast_cache import PodcastCache
 from mytunes.providers.podcasts import PodcastProvider
 from mytunes.ui.theme import MetroTheme
@@ -29,7 +33,9 @@ class PodcastsView(ft.Container):
         page: ft.Page,
         db_conn: sqlite3.Connection,
         theme: MetroTheme,
-        on_play_episode: Callable[[Episode, PodcastShow], None]
+        on_play_episode: Callable[[Episode, PodcastShow], None],
+        on_play_next: Optional[Callable[[Track], None]] = None,
+        on_add_queue: Optional[Callable[[Track], None]] = None,
     ):
         super().__init__()
         self.app_page = page
@@ -37,6 +43,10 @@ class PodcastsView(ft.Container):
         self._mt = theme
         self.provider = PodcastProvider()
         self.on_play_episode = on_play_episode
+        self.on_play_next = on_play_next
+        self.on_add_queue = on_add_queue
+        self._audio_cache: Optional[CacheManager] = None
+        self._downloading_episode_ids: set[str] = set()
 
         self.subscribed_shows: List[PodcastShow] = []
         self.search_results: List[PodcastShow] = []
@@ -437,6 +447,21 @@ class PodcastsView(ft.Container):
             detailed_show = self.provider.parse_feed(show.feed_url)
             if not detailed_show or not detailed_show.episodes:
                 raise ValueError("The feed contains no playable episodes.")
+            cached = self.cache.get_feed(show.feed_url)
+            if cached is not None:
+                cached_episodes = {
+                    episode.id: episode for episode in cached[0].episodes
+                }
+                for episode in detailed_show.episodes:
+                    cached_episode = cached_episodes.get(episode.id)
+                    if (
+                        cached_episode
+                        and cached_episode.audio_url == episode.audio_url
+                        and cached_episode.download_path
+                        and os.path.isfile(cached_episode.download_path)
+                    ):
+                        episode.is_downloaded = True
+                        episode.download_path = cached_episode.download_path
             self.cache.store_feed(detailed_show)
             error = None
         except Exception as exc:
@@ -627,6 +652,50 @@ class PodcastsView(ft.Container):
                 f"{hours}h {minutes}m" if hours > 0 else f"{minutes}:{seconds:02d}"
             )
 
+        is_downloaded = bool(
+            episode.download_path and os.path.isfile(episode.download_path)
+        )
+        episode.is_downloaded = is_downloaded
+        if not is_downloaded:
+            episode.download_path = None
+
+        menu_items: list[ft.PopupMenuItem] = []
+        if self.on_play_next:
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content="Play Next",
+                    icon=ft.Icons.PLAY_ARROW,
+                    on_click=lambda e, ep=episode, selected_show=show: self.on_play_next(
+                        self._episode_as_track(ep, selected_show)
+                    ),
+                )
+            )
+        if self.on_add_queue:
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content="Add to Queue",
+                    icon=ft.Icons.QUEUE_MUSIC,
+                    on_click=lambda e, ep=episode, selected_show=show: self.on_add_queue(
+                        self._episode_as_track(ep, selected_show)
+                    ),
+                )
+            )
+        download_item = ft.PopupMenuItem(
+            content="Delete Download" if is_downloaded else "Download Episode",
+            icon=ft.Icons.DELETE_OUTLINE if is_downloaded else ft.Icons.DOWNLOAD,
+        )
+        download_item.on_click = lambda e, ep=episode, selected_show=show, item=download_item: (
+            self._delete_episode_download(ep, selected_show, item)
+            if ep.is_downloaded
+            else self._start_episode_download(ep, selected_show, item)
+        )
+        menu_items.append(download_item)
+        episode_menu = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            tooltip="Episode options",
+            items=menu_items,
+        )
+
         return ft.Container(
             bgcolor=self._mt.surface_color,
             border=ft.Border.all(1, self._mt.border_color),
@@ -686,9 +755,143 @@ class PodcastsView(ft.Container):
                             ),
                         ],
                     ),
+                    episode_menu,
                 ],
             ),
         )
+
+    @staticmethod
+    def _episode_as_track(episode: Episode, show: PodcastShow) -> Track:
+        local_path = (
+            episode.download_path
+            if episode.download_path and os.path.isfile(episode.download_path)
+            else None
+        )
+        return Track(
+            id=f"pod_{episode.id}",
+            title=episode.title,
+            artist=show.author or show.title,
+            album=show.title,
+            duration=episode.duration,
+            file_path=local_path or episode.audio_url,
+            source="local" if local_path else "stream",
+            artwork_url=show.artwork_url,
+        )
+
+    @staticmethod
+    def _download_episode_id(episode: Episode) -> str:
+        identity = episode.id or episode.audio_url
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+    def _start_episode_download(
+        self,
+        episode: Episode,
+        show: PodcastShow,
+        menu_item: ft.PopupMenuItem,
+    ) -> None:
+        if episode.id in self._downloading_episode_ids:
+            return
+        if not episode.audio_url:
+            show_snackbar(self.app_page, "This episode has no downloadable audio URL.")
+            return
+
+        self._downloading_episode_ids.add(episode.id)
+        menu_item.content = "Downloading..."
+        menu_item.disabled = True
+        safe_update(self)
+        threading.Thread(
+            target=self._download_episode_worker,
+            args=(episode, show, menu_item),
+            daemon=True,
+        ).start()
+
+    def _download_episode_worker(
+        self,
+        episode: Episode,
+        show: PodcastShow,
+        menu_item: ft.PopupMenuItem,
+    ) -> None:
+        try:
+            if self._audio_cache is None:
+                self._audio_cache = CacheManager()
+            download_path = self._audio_cache.download_for_offline(
+                episode.audio_url,
+                self._download_episode_id(episode),
+                episode.title,
+            )
+            error = None if download_path else "The episode could not be downloaded."
+        except Exception as exc:
+            logger.exception("Podcast episode download failed for %r", episode.audio_url)
+            download_path = None
+            error = str(exc)
+
+        async def apply_download() -> None:
+            self._downloading_episode_ids.discard(episode.id)
+            menu_item.disabled = False
+            if download_path:
+                episode.download_path = download_path
+                episode.is_downloaded = True
+                self.cache.store_feed(show)
+                menu_item.content = "Delete Download"
+                menu_item.icon = ft.Icons.DELETE_OUTLINE
+                show_snackbar(self.app_page, f"Downloaded '{episode.title}'")
+            else:
+                menu_item.content = "Download Episode"
+                menu_item.icon = ft.Icons.DOWNLOAD
+                logger.warning(
+                    "Podcast episode download failed for %r: %s",
+                    episode.audio_url,
+                    error,
+                )
+                show_snackbar(self.app_page, error or "The episode could not be downloaded.")
+            safe_update(self)
+
+        self.app_page.run_task(apply_download)
+
+    def _delete_episode_download(
+        self,
+        episode: Episode,
+        show: PodcastShow,
+        menu_item: ft.PopupMenuItem,
+    ) -> None:
+        path = episode.download_path
+        if path and os.path.isfile(path):
+            offline_dir = os.path.realpath(OFFLINE_DIR)
+            resolved_path = os.path.realpath(path)
+            safe_title = "".join(
+                char for char in episode.title
+                if char.isalnum() or char in (" ", "_", "-")
+            ).strip()
+            expected_path = os.path.realpath(
+                os.path.join(
+                    offline_dir,
+                    f"{safe_title}_{self._download_episode_id(episode)}.mp3",
+                )
+            )
+            try:
+                is_managed_download = os.path.commonpath(
+                    [offline_dir, resolved_path]
+                ) == offline_dir and resolved_path == expected_path
+            except ValueError:
+                is_managed_download = False
+            if not is_managed_download:
+                logger.error("Refusing to delete podcast download outside offline directory: %s", path)
+                show_snackbar(self.app_page, "Could not safely delete this episode download.")
+                return
+            try:
+                os.remove(resolved_path)
+            except OSError as exc:
+                logger.exception("Could not delete podcast episode download %r", path)
+                show_snackbar(self.app_page, f"Could not delete download: {exc}")
+                return
+
+        episode.download_path = None
+        episode.is_downloaded = False
+        self.cache.store_feed(show)
+        menu_item.content = "Download Episode"
+        menu_item.icon = ft.Icons.DOWNLOAD
+        safe_update(self)
+        show_snackbar(self.app_page, f"Deleted download for '{episode.title}'")
 
     def _on_episode_list_scroll(
         self,
