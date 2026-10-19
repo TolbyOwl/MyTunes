@@ -196,6 +196,31 @@ class TestPodcastEpisodeRendering(unittest.TestCase):
         self.assertEqual(next_track.source, "stream")
         self.assertEqual(queued_track.id, next_track.id)
 
+    def test_episode_detail_shows_same_menu_beside_play_button(self):
+        episode = self.show.episodes[0]
+
+        self.view._open_episode_details(episode, self.show)
+
+        header_card = self.view.content_area.controls[1]
+        metadata_col = header_card.content.controls[1]
+        actions_row = metadata_col.controls[4]
+        self.assertIsInstance(actions_row, ft.Row)
+        self.assertIsInstance(actions_row.controls[0], ft.FilledButton)
+        episode_menu = actions_row.controls[1]
+        self.assertIsInstance(episode_menu, ft.PopupMenuButton)
+        self.assertEqual(
+            [item.content for item in episode_menu.items],
+            ["Play Next", "Add to Queue", "Download Episode"],
+        )
+
+        episode_menu.items[0].on_click(None)
+        episode_menu.items[1].on_click(None)
+
+        next_track = self.on_play_next.call_args.args[0]
+        queued_track = self.on_add_queue.call_args.args[0]
+        self.assertEqual(next_track.id, f"pod_{episode.id}")
+        self.assertEqual(queued_track.id, next_track.id)
+
     def test_search_return_button_matches_top_left_back_button_style(self):
         self.view.search_results = [self.show]
 

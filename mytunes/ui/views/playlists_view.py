@@ -80,12 +80,26 @@ class PlaylistsView(ft.Container):
         )
 
     def load_playlists(self) -> None:
+        selected_playlist_id = (
+            self.selected_playlist.id if self.selected_playlist else None
+        )
         cursor = self.conn.execute("SELECT id, name, description, created_at, updated_at FROM playlists ORDER BY name")
         self.playlists = [
             Playlist(id=r["id"], name=r["name"], description=r["description"] or "", created_at=r["created_at"], updated_at=r["updated_at"])
             for r in cursor.fetchall()
         ]
+        if selected_playlist_id:
+            self.selected_playlist = next(
+                (
+                    playlist
+                    for playlist in self.playlists
+                    if playlist.id == selected_playlist_id
+                ),
+                None,
+            )
         self._render_sidebar()
+        if self.selected_playlist:
+            self._load_playlist_tracks(self.selected_playlist.id)
 
     def _render_sidebar(self) -> None:
         self.sidebar_list.controls.clear()

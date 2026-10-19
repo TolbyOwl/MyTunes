@@ -1,10 +1,12 @@
 import asyncio
+import sqlite3
 import unittest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import flet as ft
 
 from mytunes.models.track import Track
+from mytunes.models.schema import init_db
 from mytunes.ui.theme import MetroTheme
 from mytunes.ui.views.music_view import MusicView
 
@@ -119,6 +121,67 @@ class TestMusicSongList(unittest.TestCase):
         callback(None)
 
         run_task.assert_called_once_with(view._jump_to_song_group, "B")
+
+    def test_song_menu_adds_track_to_selected_playlist(self):
+        connection = init_db(":memory:")
+        connection.execute(
+            "INSERT INTO tracks (id, title, file_path, date_added) VALUES (?, ?, ?, ?)",
+            ("track", "Song", "song.mp3", 1.0),
+        )
+        connection.execute(
+            "INSERT INTO tracks (id, title, file_path, date_added) VALUES (?, ?, ?, ?)",
+            ("existing-track", "Earlier Song", "earlier.mp3", 1.0),
+        )
+        connection.execute(
+            "INSERT INTO playlists (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("playlist", "Favorites Mix", 1.0, 1.0),
+        )
+        connection.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)",
+            ("playlist", "existing-track", 0),
+        )
+        connection.commit()
+        provider = Mock()
+        provider.get_all_tracks.return_value = [Track(id="track", title="Song")]
+        provider.conn = connection
+        view = MusicView(
+            MagicMock(),
+            provider,
+            MetroTheme(),
+            Mock(),
+            Mock(),
+            Mock(),
+        )
+        track_row = view._build_track_row(Track(id="track", title="Song"))
+        track_menu = track_row.content.controls[-1]
+
+        self.assertEqual(
+            [item.content for item in track_menu.items],
+            [
+                "Play Next",
+                "Add to Queue",
+                "Add to Favourites",
+                "Add to a Playlist",
+            ],
+        )
+        with patch("mytunes.ui.views.music_view.open_dialog") as open_dialog:
+            track_menu.items[-1].on_click(None)
+
+        dialog = open_dialog.call_args.args[1]
+        dialog.content.content.controls[0].on_click(None)
+
+        membership = connection.execute(
+            "SELECT position FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+            ("playlist", "track"),
+        ).fetchone()
+        self.assertEqual(membership["position"], 1)
+
+        with patch("mytunes.ui.views.music_view.show_snackbar") as show_snackbar:
+            view._add_track_to_playlist(Track(id="track", title="Song"), "playlist", "Favorites Mix")
+        show_snackbar.assert_called_once_with(
+            view.app_page, "'Song' is already in 'Favorites Mix'"
+        )
+        connection.close()
 
     def test_descending_sort_reverses_letter_rail(self):
         view, _ = self._create_view([

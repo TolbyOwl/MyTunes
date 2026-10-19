@@ -688,49 +688,7 @@ class PodcastsView(ft.Container):
                 f"{hours}h {minutes}m" if hours > 0 else f"{minutes}:{seconds:02d}"
             )
 
-        is_downloaded = bool(
-            episode.download_path and os.path.isfile(episode.download_path)
-        )
-        episode.is_downloaded = is_downloaded
-        if not is_downloaded:
-            episode.download_path = None
-
-        menu_items: list[ft.PopupMenuItem] = []
-        if self.on_play_next:
-            menu_items.append(
-                ft.PopupMenuItem(
-                    content="Play Next",
-                    icon=ft.Icons.PLAY_ARROW,
-                    on_click=lambda e, ep=episode, selected_show=show: self.on_play_next(
-                        self._episode_as_track(ep, selected_show)
-                    ),
-                )
-            )
-        if self.on_add_queue:
-            menu_items.append(
-                ft.PopupMenuItem(
-                    content="Add to Queue",
-                    icon=ft.Icons.QUEUE_MUSIC,
-                    on_click=lambda e, ep=episode, selected_show=show: self.on_add_queue(
-                        self._episode_as_track(ep, selected_show)
-                    ),
-                )
-            )
-        download_item = ft.PopupMenuItem(
-            content="Delete Download" if is_downloaded else "Download Episode",
-            icon=ft.Icons.DELETE_OUTLINE if is_downloaded else ft.Icons.DOWNLOAD,
-        )
-        download_item.on_click = lambda e, ep=episode, selected_show=show, item=download_item: (
-            self._delete_episode_download(ep, selected_show, item)
-            if ep.is_downloaded
-            else self._start_episode_download(ep, selected_show, item)
-        )
-        menu_items.append(download_item)
-        episode_menu = ft.PopupMenuButton(
-            icon=ft.Icons.MORE_VERT,
-            tooltip="Episode options",
-            items=menu_items,
-        )
+        episode_menu = self._build_episode_menu(episode, show)
 
         return ft.Container(
             bgcolor=self._mt.surface_color,
@@ -795,6 +753,54 @@ class PodcastsView(ft.Container):
                 ],
             ),
         )
+
+    def _build_episode_menu(
+        self, episode: Episode, show: PodcastShow
+    ) -> ft.PopupMenuButton:
+        is_downloaded = bool(
+            episode.download_path and os.path.isfile(episode.download_path)
+        )
+        episode.is_downloaded = is_downloaded
+        if not is_downloaded:
+            episode.download_path = None
+
+        menu_items: list[ft.PopupMenuItem] = []
+        if self.on_play_next:
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content="Play Next",
+                    icon=ft.Icons.PLAY_ARROW,
+                    on_click=lambda e, ep=episode, selected_show=show: self.on_play_next(
+                        self._episode_as_track(ep, selected_show)
+                    ),
+                )
+            )
+        if self.on_add_queue:
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content="Add to Queue",
+                    icon=ft.Icons.QUEUE_MUSIC,
+                    on_click=lambda e, ep=episode, selected_show=show: self.on_add_queue(
+                        self._episode_as_track(ep, selected_show)
+                    ),
+                )
+            )
+        download_item = ft.PopupMenuItem(
+            content="Delete Download" if is_downloaded else "Download Episode",
+            icon=ft.Icons.DELETE_OUTLINE if is_downloaded else ft.Icons.DOWNLOAD,
+        )
+        download_item.on_click = lambda e, ep=episode, selected_show=show, item=download_item: (
+            self._delete_episode_download(ep, selected_show, item)
+            if ep.is_downloaded
+            else self._start_episode_download(ep, selected_show, item)
+        )
+        menu_items.append(download_item)
+        episode_menu = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            tooltip="Episode options",
+            items=menu_items,
+        )
+        return episode_menu
 
     @staticmethod
     def _episode_as_track(episode: Episode, show: PodcastShow) -> Track:
@@ -1061,6 +1067,7 @@ class PodcastsView(ft.Container):
             height=42,
             on_click=lambda e: self.on_play_episode(episode, show)
         )
+        episode_menu = self._build_episode_menu(episode, show)
 
         # Header metadata card
         metadata_col = ft.Column(
@@ -1088,7 +1095,7 @@ class PodcastsView(ft.Container):
                     ]
                 ),
                 ft.Container(height=6),
-                ft.Row([play_button])
+                ft.Row([play_button, episode_menu], spacing=8)
             ]
         )
 

@@ -346,6 +346,8 @@ def main(page: ft.Page) -> None:
         nonlocal lyrics_active
         lyrics_active = False
         content_container.content = views[index]
+        if index == 3:
+            view_playlists.load_playlists()
         page.update()
 
     # 7. Metro Pivot Navigation Header

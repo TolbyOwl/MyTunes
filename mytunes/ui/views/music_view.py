@@ -1,8 +1,16 @@
 from __future__ import annotations
-from mytunes.ui.dialog_utils import safe_update, show_snackbar
+from mytunes.ui.dialog_utils import (
+    close_dialog,
+    open_dialog,
+    safe_update,
+    show_snackbar,
+)
+import logging
 import os
 import re
 import random
+import sqlite3
+import time
 import unicodedata
 import urllib.parse
 import flet as ft
@@ -13,6 +21,8 @@ from mytunes.providers.local import LocalProvider
 from mytunes.providers.metadata import ArtistMetadataProvider
 from mytunes.ui.theme import MetroTheme
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 class MusicView(ft.Container):
@@ -1403,6 +1413,11 @@ class MusicView(ft.Container):
                 ft.PopupMenuItem(content="Play Next", icon=ft.Icons.PLAY_ARROW, on_click=lambda e, tr=track: self.on_play_next(tr)),
                 ft.PopupMenuItem(content="Add to Queue", icon=ft.Icons.QUEUE_MUSIC, on_click=lambda e, tr=track: self.on_add_queue(tr)),
                 fav_item,
+                ft.PopupMenuItem(
+                    content="Add to a Playlist",
+                    icon=ft.Icons.PLAYLIST_ADD,
+                    on_click=lambda e, tr=track: self._show_add_to_playlist_dialog(tr),
+                ),
             ]
         )
 
@@ -1417,6 +1432,100 @@ class MusicView(ft.Container):
                 controls=[art_img, title_col, duration_text, menu_btn]
             )
         )
+
+    def _show_add_to_playlist_dialog(self, track: Track) -> None:
+        try:
+            playlists = self.provider.conn.execute(
+                "SELECT id, name FROM playlists ORDER BY name COLLATE NOCASE, id"
+            ).fetchall()
+        except sqlite3.Error:
+            logger.exception("Could not load playlists for track %r", track.id)
+            show_snackbar(self.app_page, "Could not load playlists.")
+            return
+
+        if not playlists:
+            dialog = ft.AlertDialog(
+                title=ft.Text("Add to a Playlist"),
+                content=ft.Text("No playlists yet. Create one from the Playlists page first."),
+                actions=[
+                    ft.TextButton(
+                        "Close",
+                        on_click=lambda e: close_dialog(self.app_page, dialog),
+                    )
+                ],
+            )
+        else:
+            playlist_buttons = []
+            for playlist in playlists:
+                playlist_id = playlist["id"]
+                playlist_name = playlist["name"]
+
+                def select_playlist(
+                    e, selected_id=playlist_id, selected_name=playlist_name
+                ) -> None:
+                    close_dialog(self.app_page, dialog)
+                    self._add_track_to_playlist(
+                        track, selected_id, selected_name
+                    )
+
+                playlist_buttons.append(
+                    ft.TextButton(
+                        playlist_name,
+                        on_click=select_playlist,
+                    )
+                )
+            dialog = ft.AlertDialog(
+                title=ft.Text(f'Add "{track.title}" to a Playlist'),
+                content=ft.Container(
+                    width=360,
+                    content=ft.Column(
+                        controls=playlist_buttons,
+                        spacing=4,
+                        tight=True,
+                    ),
+                ),
+                actions=[
+                    ft.TextButton(
+                        "Cancel",
+                        on_click=lambda e: close_dialog(self.app_page, dialog),
+                    )
+                ],
+            )
+        open_dialog(self.app_page, dialog)
+
+    def _add_track_to_playlist(
+        self, track: Track, playlist_id: str, playlist_name: str
+    ) -> None:
+        try:
+            with self.provider.conn:
+                position = self.provider.conn.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 "
+                    "FROM playlist_tracks WHERE playlist_id = ?",
+                    (playlist_id,),
+                ).fetchone()[0]
+                cursor = self.provider.conn.execute(
+                    "INSERT OR IGNORE INTO playlist_tracks "
+                    "(playlist_id, track_id, position) VALUES (?, ?, ?)",
+                    (playlist_id, track.id, position),
+                )
+                if cursor.rowcount:
+                    self.provider.conn.execute(
+                        "UPDATE playlists SET updated_at = ? WHERE id = ?",
+                        (time.time(), playlist_id),
+                    )
+        except sqlite3.Error:
+            logger.exception(
+                "Could not add track %r to playlist %r",
+                track.id,
+                playlist_id,
+            )
+            show_snackbar(self.app_page, "Could not add this song to the playlist.")
+            return
+
+        if cursor.rowcount:
+            show_snackbar(self.app_page, f"Added '{track.title}' to '{playlist_name}'")
+        else:
+            show_snackbar(self.app_page, f"'{track.title}' is already in '{playlist_name}'")
 
     def _build_artwork(
         self,
