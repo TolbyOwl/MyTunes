@@ -121,9 +121,9 @@ class WindowsMediaControls:
             if artwork_path is None:
                 self._display_updater.thumbnail = None
             else:
-                storage_file = self._storage_file.get_file_from_path_async(
+                storage_file = await self._storage_file.get_file_from_path_async(
                     str(artwork_path)
-                ).get()
+                )
                 self._display_updater.thumbnail = (
                     self._stream_reference.create_from_file(storage_file)
                 )

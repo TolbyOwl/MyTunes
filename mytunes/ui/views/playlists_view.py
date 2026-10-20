@@ -32,6 +32,7 @@ class PlaylistsView(ft.Container):
         self.playlists: List[Playlist] = []
         self.selected_playlist: Optional[Playlist] = None
         self.playlist_tracks: List[Track] = []
+        self._loaded = False
 
         self.expand = True
         self.padding = ft.Padding.all(24)
@@ -42,6 +43,10 @@ class PlaylistsView(ft.Container):
 
         self._build_view()
         self.load_playlists()
+
+    def ensure_loaded(self) -> None:
+        if not self._loaded:
+            self.load_playlists()
 
     def _build_view(self) -> None:
         title = ft.Text("PLAYLISTS", size=24, weight=ft.FontWeight.W_800, color=self._mt.text_primary)
@@ -103,6 +108,7 @@ class PlaylistsView(ft.Container):
         else:
             self.playlist_tracks = []
             self._render_empty_selection()
+        self._loaded = True
 
     def _render_sidebar(self) -> None:
         self.sidebar_list.controls.clear()

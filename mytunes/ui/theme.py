@@ -57,13 +57,21 @@ class MetroTheme:
         Extracts dominant vibrant color from album artwork image using PIL.
         Converts image to thumbnail and finds vibrant saturated color.
         """
+        color = self.find_dominant_accent(image_path)
+        if color:
+            self.dynamic_accent = color
+        return color
+
+    @staticmethod
+    def find_dominant_accent(image_path: str) -> Optional[str]:
+        """Finds a dominant vibrant color without mutating shared theme state."""
         if not image_path or not os.path.exists(image_path):
             return None
 
         try:
             with Image.open(image_path) as img:
-                img = img.convert("RGB")
                 img.thumbnail((48, 48))
+                img = img.convert("RGB")
 
                 colors = img.getcolors(maxcolors=48 * 48)
                 if not colors:
@@ -89,9 +97,7 @@ class MetroTheme:
                             best_color = (r, g, b)
 
                 if best_color:
-                    hex_color = f"#{best_color[0]:02x}{best_color[1]:02x}{best_color[2]:02x}"
-                    self.dynamic_accent = hex_color
-                    return hex_color
+                    return f"#{best_color[0]:02x}{best_color[1]:02x}{best_color[2]:02x}"
         except Exception:
             pass
 

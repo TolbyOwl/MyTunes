@@ -87,6 +87,9 @@ class TestWindowsMediaControls(unittest.TestCase):
         media_controls._track_generation = 2
         media_controls._display_updater = Mock()
         media_controls._storage_file = Mock()
+        media_controls._storage_file.get_file_from_path_async = AsyncMock(
+            return_value="storage-file"
+        )
         media_controls._stream_reference = Mock()
         media_controls._stream_reference.create_from_file.return_value = "stream-ref"
         media_controls.artwork_cache = MediaArtworkCache()
@@ -99,7 +102,7 @@ class TestWindowsMediaControls(unittest.TestCase):
         ):
             asyncio.run(media_controls._update_artwork(2, track))
 
-        media_controls._storage_file.get_file_from_path_async.assert_called_once_with(
+        media_controls._storage_file.get_file_from_path_async.assert_awaited_once_with(
             "C:\\covers\\cover.jpg"
         )
         self.assertEqual(media_controls._display_updater.thumbnail, "stream-ref")

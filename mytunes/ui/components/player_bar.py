@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from mytunes.ui.dialog_utils import safe_update
 import flet as ft
 from typing import Optional, Callable
@@ -50,6 +51,7 @@ class PlayerBar(ft.Container):
         self.is_dragging_slider = False
         self._controller_mode = False
         self._controller_visible_state: dict[str, bool] = {}
+        self._track_update_generation = 0
 
         # UI Controls
         # Placeholder disc — shown when no artwork is loaded
@@ -473,8 +475,15 @@ class PlayerBar(ft.Container):
         self.album_art_img.src = ""
         self._album_art_placeholder.visible = True
 
-    def update_track(self, track: Optional[Track]) -> None:
+    def update_track(
+        self,
+        track: Optional[Track],
+        *,
+        update_ui: bool = True,
+    ) -> None:
         """Updates track information and extracts dynamic accent color."""
+        self._track_update_generation += 1
+        generation = self._track_update_generation
         if not track:
             self._placeholder_icon.icon = ft.Icons.MUSIC_NOTE
             self._artwork_error_icon.icon = ft.Icons.MUSIC_NOTE
@@ -500,7 +509,8 @@ class PlayerBar(ft.Container):
             self._mt.reset_dynamic_accent()
             self._apply_theme_colors()
             self._refresh_controller_visibility()
-            safe_update(self)
+            if update_ui:
+                safe_update(self)
             return
 
         is_radio = track.id.startswith("radio_")
@@ -542,9 +552,13 @@ class PlayerBar(ft.Container):
         # Artwork & Dynamic Theme
         if track.artwork_path:
             self._show_artwork(track.artwork_path)
-            extracted_color = self._mt.extract_dominant_accent(track.artwork_path)
-            if extracted_color:
-                self._apply_theme_colors()
+            self._mt.reset_dynamic_accent()
+            self._apply_theme_colors()
+            self.app_page.run_task(
+                self._extract_track_accent,
+                generation,
+                track.artwork_path,
+            )
         elif track.artwork_url:
             self._show_artwork(track.artwork_url)
             self._mt.reset_dynamic_accent()
@@ -572,6 +586,20 @@ class PlayerBar(ft.Container):
         self.time_total.value = track.formatted_duration
         self.progress_slider.max = track.duration if track.duration > 0 else 100.0
         self.progress_slider.value = 0.0
+        if update_ui:
+            safe_update(self)
+
+    async def _extract_track_accent(self, generation: int, image_path: str) -> None:
+        if generation != self._track_update_generation:
+            return
+        accent = await asyncio.to_thread(
+            self._mt.find_dominant_accent,
+            image_path,
+        )
+        if generation != self._track_update_generation:
+            return
+        self._mt.dynamic_accent = accent
+        self._apply_theme_colors()
         safe_update(self)
 
     def _refresh_controller_visibility(self) -> None:

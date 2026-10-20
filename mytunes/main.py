@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 class XInputController:
     """Polls XInput and DirectInput gamepads and routes their controls to the UI."""
 
+    _CONNECTED_POLL_INTERVAL = 0.05
+    _DISCONNECTED_POLL_INTERVAL = 0.25
+
     # XInput bitmask constants
     DPAD_UP = 0x0001
     DPAD_DOWN = 0x0002
@@ -97,6 +100,7 @@ class XInputController:
         self._pressed_buttons = 0
         self._stick_dead_zone = 0.35
         self._axis_repeat_at: dict[str, float] = {}
+        self._axis_held_since: dict[str, float] = {}
         self._left_trigger_pressed = False
         self._right_trigger_pressed = False
         self._focus_items: list[dict[str, Any]] = []
@@ -150,11 +154,14 @@ class XInputController:
         self._left_trigger_pressed = False
         self._right_trigger_pressed = False
         self._axis_repeat_at.clear()
+        self._axis_held_since.clear()
         self.player_bar.set_controller_mode(connected)
         hints = self._controller_hints() if connected else {}
         self.player_bar.set_controller_hints(hints)
         if self.views and hasattr(self.views[0], "set_controller_mode"):
             self.views[0].set_controller_mode(connected, hints)
+        if hasattr(self.pivot_nav, "set_controller_mode"):
+            self.pivot_nav.set_controller_mode(connected)
         self.controller_mode = connected
         if connected:
             self._focus_index = -1
@@ -169,6 +176,8 @@ class XInputController:
             self.player_bar.set_controller_mode(False)
             if self.views and hasattr(self.views[0], "set_controller_mode"):
                 self.views[0].set_controller_mode(False)
+            if hasattr(self.pivot_nav, "set_controller_mode"):
+                self.pivot_nav.set_controller_mode(False)
             self.reset_focus()
             self.page.update()
 
@@ -180,6 +189,8 @@ class XInputController:
             self.player_bar.set_controller_hints(hints)
             if self.views and hasattr(self.views[0], "set_controller_mode"):
                 self.views[0].set_controller_mode(True, hints)
+            if hasattr(self.pivot_nav, "set_controller_mode"):
+                self.pivot_nav.set_controller_mode(True)
             self.page.update()
 
     async def _poll_loop(self):
@@ -190,7 +201,7 @@ class XInputController:
             if gamepad_state is None:
                 if self.connected:
                     self._set_connected(False)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(self._DISCONNECTED_POLL_INTERVAL)
                 continue
 
             if not self.connected:
@@ -200,7 +211,7 @@ class XInputController:
             self._handle_button_state(buttons)
             self._handle_analog(left_x, left_y, right_x, right_y)
             self._handle_triggers(left_trigger, right_trigger)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(self._CONNECTED_POLL_INTERVAL)
 
     def _read_xinput_state(self) -> Optional[tuple[int, float, float, float, float, int, int]]:
         if self._xinput is None:
@@ -366,17 +377,21 @@ class XInputController:
         if self._axis_should_repeat("right_y", right_y):
             self._move_queue_order(-1 if right_y < 0 else 1)
         if self._axis_should_repeat("left_x", left_x):
-            self._adjust_now_playing_control(-1 if left_x < 0 else 1)
+            self._move_horizontal_selection(-1 if left_x < 0 else 1)
 
     def _axis_should_repeat(self, axis_name: str, value: float) -> bool:
         now = time.monotonic()
         if abs(value) <= self._stick_dead_zone:
             self._axis_repeat_at.pop(axis_name, None)
+            self._axis_held_since.pop(axis_name, None)
             return False
+        held_since = self._axis_held_since.setdefault(axis_name, now)
         next_repeat = self._axis_repeat_at.get(axis_name, 0.0)
         if now < next_repeat:
             return False
-        self._axis_repeat_at[axis_name] = now + 0.22
+        held_for = now - held_since
+        repeat_interval = max(0.07, 0.22 - held_for * 0.1)
+        self._axis_repeat_at[axis_name] = now + repeat_interval
         return True
 
     def _handle_triggers(self, left_trigger: int, right_trigger: int) -> None:
@@ -458,14 +473,36 @@ class XInputController:
         focusables = view.controller_focusables()
         if not focusables:
             return
-        if self._now_playing_focus_index < 0:
-            self._now_playing_focus_index = 0
-        else:
-            self._now_playing_focus_index = min(
-                len(focusables) - 1,
-                max(0, self._now_playing_focus_index + direction),
-            )
+        self._now_playing_focus_index = view.move_controller_focus(
+            self._now_playing_focus_index,
+            direction,
+            horizontal=False,
+        )
         view.set_controller_focus(self._now_playing_focus_index)
+
+    def _move_horizontal_selection(self, direction: int) -> None:
+        if self._lyrics_active() or self._has_queue_session():
+            return
+        if self.pivot_nav.active_index == 0:
+            view = self.views[0]
+            focusables = view.controller_focusables()
+            if (
+                0 <= self._now_playing_focus_index < len(focusables)
+                and focusables[self._now_playing_focus_index]
+                in (view.progress_slider, view.volume_slider)
+            ):
+                self._adjust_now_playing_control(direction)
+                return
+            if not focusables:
+                return
+            self._now_playing_focus_index = view.move_controller_focus(
+                self._now_playing_focus_index,
+                direction,
+                horizontal=True,
+            )
+            view.set_controller_focus(self._now_playing_focus_index)
+            return
+        self._move_list_selection(direction)
 
     def _move_generic_focus(self, root: ft.Control, direction: int) -> None:
         self._focus_items = self._collect_focus_items(root)
@@ -672,33 +709,56 @@ class XInputController:
         else:
             self._focus_items = items
 
+    @staticmethod
+    def _is_focus_scrollable(control: ft.Control) -> bool:
+        return isinstance(control, (ft.ListView, ft.GridView)) or (
+            isinstance(control, ft.ScrollableControl)
+            and getattr(control, "scroll", None) is not None
+        )
+
     def _collect_focus_items(self, root: ft.Control) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
 
-        def visit(control: Any, parent_item: Optional[dict[str, Any]] = None) -> None:
+        def visit(
+            control: Any,
+            parent_item: Optional[dict[str, Any]] = None,
+            scrollable: Optional[ft.Control] = None,
+        ) -> None:
             if not isinstance(control, ft.Control) or not getattr(control, "visible", True):
                 return
+            if self._is_focus_scrollable(control):
+                scrollable = control
             if isinstance(control, ft.PopupMenuButton):
                 if parent_item is not None and control.items:
                     parent_item["menu"] = control
                 elif control.items:
-                    items.append({"control": control, "menu": control})
+                    items.append(
+                        {
+                            "control": control,
+                            "menu": control,
+                            "scrollable": scrollable,
+                        }
+                    )
                 return
 
             current_item = parent_item
             on_click = getattr(control, "on_click", None)
             is_text_field = isinstance(control, ft.TextField)
             if (callable(on_click) or is_text_field) and parent_item is None:
-                current_item = {"control": control, "menu": None}
+                current_item = {
+                    "control": control,
+                    "menu": None,
+                    "scrollable": scrollable,
+                }
                 items.append(current_item)
 
             content = getattr(control, "content", None)
             if isinstance(content, ft.Control):
-                visit(content, current_item)
+                visit(content, current_item, scrollable)
             for child in getattr(control, "controls", []) or []:
-                visit(child, current_item)
+                visit(child, current_item, scrollable)
             for child in getattr(control, "actions", []) or []:
-                visit(child, current_item)
+                visit(child, current_item, scrollable)
 
         visit(root)
         return items
@@ -721,23 +781,38 @@ class XInputController:
             control.focused_border_color = self.player_bar._mt.current_accent
             safe_update(control)
         if control is not None:
-            self._scroll_focus_into_view(control)
+            scrollable = next(
+                (
+                    item.get("scrollable")
+                    for item in self._focus_items
+                    if item["control"] is control
+                ),
+                None,
+            )
+            self._scroll_focus_into_view(control, scrollable)
 
-    def _scroll_focus_into_view(self, control: ft.Control) -> None:
+    def _scroll_focus_into_view(
+        self,
+        control: ft.Control,
+        scrollable: Optional[ft.Control] = None,
+    ) -> None:
         if control.key is None:
             control.key = ft.ScrollKey(f"controller-focus-{id(control)}")
             safe_update(control)
 
-        parent = control.parent
-        while isinstance(parent, ft.Control):
-            if isinstance(parent, (ft.Column, ft.ListView, ft.GridView)):
-                self.page.run_task(
-                    parent.scroll_to,
-                    scroll_key=str(control.key),
-                    duration=220,
-                )
-                return
-            parent = parent.parent
+        if scrollable is None:
+            parent = control.parent
+            while isinstance(parent, ft.Control):
+                if self._is_focus_scrollable(parent):
+                    scrollable = parent
+                    break
+                parent = parent.parent
+        if scrollable is not None:
+            self.page.run_task(
+                scrollable.scroll_to,
+                scroll_key=str(control.key),
+                duration=220,
+            )
 
     def _clear_focus(self) -> None:
         if self._focused_control is None or self._focused_original is None:
@@ -931,6 +1006,15 @@ class QueueControllerSession:
     def _refresh(self) -> None:
         self.refresh_items()
         safe_update(self.queue_list)
+        if self.queue_manager.queue and 0 <= self.selected_index < len(
+            self.queue_manager.queue
+        ):
+            track = self.queue_manager.queue[self.selected_index]
+            self.page.run_task(
+                self.queue_list.scroll_to,
+                scroll_key=f"queue-item-{self.selected_index}-{track.id}",
+                duration=220,
+            )
 
 
 def main(page: ft.Page) -> None:
@@ -1042,23 +1126,30 @@ def main(page: ft.Page) -> None:
 
     # Forward declaration for UI callbacks
     def on_track_changed(track: Track | None) -> None:
-        player_bar.update_track(track)
-        now_playing_view.update_track(track)
+        player_bar.update_track(track, update_ui=False)
+        now_playing_view.update_track(track, update_ui=False)
         media_controls.update_track(track)
         if track and lyrics_active:
             lyrics_view.load_for_track(track)
-        page.update()
+        if pivot_nav is not None and pivot_nav.active_index == 0:
+            safe_update(now_playing_view)
+        else:
+            safe_update(player_bar)
 
     queue_manager.on_track_changed = on_track_changed
 
     def on_playback_state_changed(is_playing: bool) -> None:
-        player_bar.update_playback_state(is_playing)
-        now_playing_view.update_playback_state(is_playing)
+        if pivot_nav is not None and pivot_nav.active_index == 0:
+            now_playing_view.update_playback_state(is_playing)
+        else:
+            player_bar.update_playback_state(is_playing)
         media_controls.update_playback_state(is_playing)
 
     def on_position_changed(current: float, total: float) -> None:
-        player_bar.update_position(current, total)
-        now_playing_view.update_position(current, total)
+        if pivot_nav is not None and pivot_nav.active_index == 0:
+            now_playing_view.update_position(current, total)
+        else:
+            player_bar.update_position(current, total)
         media_controls.update_position(current, total)
         persist_playback_session()
         if lyrics_active:
@@ -1066,7 +1157,8 @@ def main(page: ft.Page) -> None:
 
     def on_volume_changed(volume: float) -> None:
         media_controls.update_volume(volume)
-        now_playing_view.update_volume(audio_engine.volume, audio_engine.is_muted)
+        if pivot_nav is not None and pivot_nav.active_index == 0:
+            now_playing_view.update_volume(audio_engine.volume, audio_engine.is_muted)
         player_bar.volume_slider.value = audio_engine.volume
         player_bar.btn_volume.icon = (
             ft.Icons.VOLUME_OFF
@@ -1077,6 +1169,8 @@ def main(page: ft.Page) -> None:
             if audio_engine.volume < 0.5
             else ft.Icons.VOLUME_UP
         )
+        if pivot_nav is None or pivot_nav.active_index != 0:
+            safe_update(player_bar)
         persist_playback_session()
 
     def on_seeked(_position: float) -> None:
@@ -1173,7 +1267,7 @@ def main(page: ft.Page) -> None:
         else:
             if pivot_nav is not None:
                 content_container.content = views[pivot_nav.active_index]
-        page.update()
+        page.update(pivot_nav, content_container, player_bar)
 
     def open_quick_mix() -> None:
         all_library_tracks = local_provider.get_all_tracks()
@@ -1385,14 +1479,32 @@ def main(page: ft.Page) -> None:
             return
         lyrics_active = False
         if pivot_nav is not None and pivot_nav.active_index != index:
-            pivot_nav.set_active_index(index)
+            pivot_nav.set_active_index(index, update=False)
         if controller_manager is not None:
             controller_manager.reset_focus()
         content_container.content = views[index]
         player_bar.visible = index != 0
+        if index == 3:
+            view_radio.ensure_featured_loaded()
         if index == 4:
-            view_playlists.load_playlists()
-        page.update()
+            view_playlists.ensure_loaded()
+        if index == 0:
+            now_playing_view.update_playback_state(audio_engine.is_playing)
+            now_playing_view.update_position(
+                audio_engine.current_position,
+                audio_engine.total_duration,
+            )
+            now_playing_view.update_volume(
+                audio_engine.volume,
+                audio_engine.is_muted,
+            )
+        else:
+            player_bar.update_playback_state(audio_engine.is_playing)
+            player_bar.update_position(
+                audio_engine.current_position,
+                audio_engine.total_duration,
+            )
+        page.update(pivot_nav, content_container, player_bar)
 
     def controller_back() -> None:
         if lyrics_active:
@@ -1429,12 +1541,10 @@ def main(page: ft.Page) -> None:
     pivot_nav.fullscreen_button.on_click = lambda e: toggle_fullscreen()
 
     def open_artist_in_music(artist_name: str) -> None:
-        pivot_nav.set_active_index(1)
         on_section_change(1)
         view_music._open_artist_page(artist_name)
 
     def open_album_in_music(album_name: str, album_artist: str) -> None:
-        pivot_nav.set_active_index(1)
         on_section_change(1)
         view_music._open_album_page(album_name, album_artist)
 

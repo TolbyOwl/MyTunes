@@ -87,7 +87,8 @@ class TestMusicSongList(unittest.TestCase):
         self.assertIs(list_container.content, view.songs_list)
         self.assertEqual(letter_rail.width, 36)
         self.assertIsNone(letter_rail.expand)
-        self.assertIsInstance(view.songs_list, ft.Column)
+        self.assertIsInstance(view.songs_list, ft.ListView)
+        self.assertTrue(view.songs_list.build_controls_on_demand)
         self.assertEqual(view.songs_list.scroll, ft.ScrollMode.AUTO)
 
     def test_direct_letter_selection_jumps_to_selected_group(self):

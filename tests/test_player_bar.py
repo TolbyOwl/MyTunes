@@ -1,5 +1,6 @@
+import asyncio
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import flet as ft
 
@@ -10,6 +11,21 @@ from mytunes.ui.theme import MetroTheme
 
 
 class TestPlayerBarNavigation(unittest.TestCase):
+
+    def _create_player(self, page=None, theme=None):
+        page = page or MagicMock()
+        theme = theme or MetroTheme()
+        return PlayerBar(
+            page,
+            MagicMock(),
+            QueueManager(),
+            theme,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+        )
 
     def test_long_artist_and_album_names_scroll_within_track_info_width(self):
         player = PlayerBar(
@@ -34,17 +50,7 @@ class TestPlayerBarNavigation(unittest.TestCase):
         self.assertTrue(player.track_album_label.no_wrap)
 
     def test_controller_mode_shows_button_badges_and_restores_player_controls(self):
-        player = PlayerBar(
-            MagicMock(),
-            MagicMock(),
-            QueueManager(),
-            MetroTheme(),
-            lambda: None,
-            lambda: None,
-            lambda: None,
-            lambda: None,
-            lambda: None,
-        )
+        player = self._create_player()
 
         player.set_controller_mode(True)
         player.set_controller_hints({"A": "Confirm", "Back": "Fullscreen"})
@@ -67,6 +73,64 @@ class TestPlayerBarNavigation(unittest.TestCase):
         self.assertTrue(player.btn_shuffle.visible)
         self.assertTrue(player.time_current.visible)
         self.assertTrue(player.time_total.visible)
+
+    def test_local_artwork_accent_extraction_runs_as_a_background_task(self):
+        page = MagicMock()
+        theme = MetroTheme()
+        player = self._create_player(page, theme)
+        track = Track(
+            id="track",
+            title="Song",
+            artwork_path="C:\\covers\\large.jpg",
+        )
+
+        with patch.object(
+            theme,
+            "find_dominant_accent",
+            return_value="#aa3344",
+        ) as find_accent:
+            player.update_track(track, update_ui=False)
+
+            page.run_task.assert_called_once_with(
+                player._extract_track_accent,
+                player._track_update_generation,
+                track.artwork_path,
+            )
+            find_accent.assert_not_called()
+
+            callback, generation, path = page.run_task.call_args.args
+            with patch("mytunes.ui.components.player_bar.safe_update") as update:
+                asyncio.run(callback(generation, path))
+
+        self.assertEqual(theme.dynamic_accent, "#aa3344")
+        self.assertEqual(player.btn_play.icon_color, "#aa3344")
+        update.assert_called_once_with(player)
+
+    def test_stale_artwork_accent_does_not_override_new_track(self):
+        page = MagicMock()
+        theme = MetroTheme()
+        player = self._create_player(page, theme)
+        track = Track(
+            id="old-track",
+            title="Old Song",
+            artwork_path="C:\\covers\\old.jpg",
+        )
+
+        player.update_track(track, update_ui=False)
+        callback, generation, path = page.run_task.call_args.args
+        player.update_track(None, update_ui=False)
+
+        with patch.object(
+            theme,
+            "find_dominant_accent",
+            return_value="#aa3344",
+        ) as find_accent:
+            with patch("mytunes.ui.components.player_bar.safe_update") as update:
+                asyncio.run(callback(generation, path))
+
+        find_accent.assert_not_called()
+        update.assert_not_called()
+        self.assertIsNone(theme.dynamic_accent)
 
     def test_artist_and_album_buttons_forward_current_track(self):
         queue = QueueManager()

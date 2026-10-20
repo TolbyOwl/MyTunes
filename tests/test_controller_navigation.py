@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -7,6 +8,8 @@ import flet as ft
 from mytunes.core.queue import QueueManager
 from mytunes.main import QueueControllerSession, XInputController
 from mytunes.models.track import Track
+from mytunes.ui.components.pivot_nav import PivotNav
+from mytunes.ui.theme import MetroTheme
 
 
 class TestControllerNavigation(unittest.TestCase):
@@ -32,6 +35,7 @@ class TestControllerNavigation(unittest.TestCase):
         controller._now_playing_focus_index = -1
         controller._pressed_buttons = 0
         controller._axis_repeat_at = {}
+        controller._axis_held_since = {}
         controller._stick_dead_zone = 0.35
         controller._left_trigger_pressed = False
         controller._right_trigger_pressed = False
@@ -65,6 +69,7 @@ class TestControllerNavigation(unittest.TestCase):
             progress_slider=ft.Slider(),
             volume_slider=ft.Slider(),
             controller_focusables=lambda: [first, second],
+            move_controller_focus=Mock(return_value=1),
             set_controller_focus=Mock(),
         )
         controller = self.make_controller()
@@ -77,6 +82,18 @@ class TestControllerNavigation(unittest.TestCase):
         self.assertEqual(controller._now_playing_focus_index, 1)
         now_playing.set_controller_focus.assert_called_once_with(1)
 
+    def test_horizontal_left_stick_moves_selection_in_other_tabs(self):
+        first = ft.Container(on_click=lambda e: None)
+        second = ft.Container(on_click=lambda e: None)
+        controller = self.make_controller([first, second])
+
+        controller._handle_analog(0.9, 0.0, 0.0, 0.0)
+
+        self.assertIs(controller._focused_control, first)
+        controller._handle_analog(0.0, 0.0, 0.0, 0.0)
+        controller._handle_analog(0.9, 0.0, 0.0, 0.0)
+        self.assertIs(controller._focused_control, second)
+
     def test_horizontal_left_stick_adjusts_selected_now_playing_sliders(self):
         progress = ft.Slider()
         volume = ft.Slider()
@@ -84,6 +101,7 @@ class TestControllerNavigation(unittest.TestCase):
             progress_slider=progress,
             volume_slider=volume,
             controller_focusables=lambda: [progress, volume],
+            move_controller_focus=Mock(return_value=1),
             set_controller_focus=Mock(),
         )
         controller = self.make_controller()
@@ -104,6 +122,128 @@ class TestControllerNavigation(unittest.TestCase):
         controller._adjust_volume = Mock()
         controller._handle_analog(-0.9, 0.0, 0.0, 0.0)
         controller._adjust_volume.assert_called_once_with(-0.05)
+
+    def test_focus_scrolls_target_using_scrollable_ancestor(self):
+        first = ft.Container(on_click=lambda e: None)
+        second = ft.Container(on_click=lambda e: None)
+        scrollable = ft.Column(
+            controls=[first, second],
+            scroll=ft.ScrollMode.AUTO,
+        )
+        root = ft.Container(content=scrollable)
+        controller = self.make_controller()
+
+        controller._sync_focus_root(root)
+        controller._move_generic_focus(root, 1)
+        target_key = first.key
+        controller._move_generic_focus(root, 1)
+
+        self.assertIs(controller._focused_control, second)
+        controller.page.run_task.assert_called_with(
+            scrollable.scroll_to,
+            scroll_key=str(second.key),
+            duration=220,
+        )
+        self.assertIsNotNone(target_key)
+
+    def test_focus_scrolls_default_list_views_without_explicit_scroll_mode(self):
+        item = ft.Container(on_click=lambda e: None)
+        scrollable = ft.ListView(controls=[item])
+        controller = self.make_controller()
+
+        controller._sync_focus_root(scrollable)
+        controller._move_generic_focus(scrollable, 1)
+
+        controller.page.run_task.assert_called_once_with(
+            scrollable.scroll_to,
+            scroll_key=str(item.key),
+            duration=220,
+        )
+
+    def test_held_analog_repeats_accelerate_progressively(self):
+        controller = self.make_controller()
+        times = iter([0.0, 0.21, 0.22, 1.65, 1.70, 1.72])
+
+        with patch("mytunes.main.time.monotonic", side_effect=lambda: next(times)):
+            results = [
+                controller._axis_should_repeat("left_y", 0.9),
+                controller._axis_should_repeat("left_y", 0.9),
+                controller._axis_should_repeat("left_y", 0.9),
+                controller._axis_should_repeat("left_y", 0.9),
+                controller._axis_should_repeat("left_y", 0.9),
+                controller._axis_should_repeat("left_y", 0.9),
+            ]
+
+        self.assertEqual(results, [True, False, True, True, False, True])
+        with patch("mytunes.main.time.monotonic", return_value=1.73):
+            self.assertFalse(controller._axis_should_repeat("left_y", 0.0))
+        self.assertNotIn("left_y", controller._axis_held_since)
+
+    def test_disconnected_controller_polling_uses_lower_frequency(self):
+        controller = self.make_controller()
+        controller._read_xinput_state = Mock(return_value=None)
+        controller._read_dinput_state = Mock(return_value=None)
+        sleep = Mock(side_effect=asyncio.CancelledError)
+
+        async def run_once():
+            with patch("mytunes.main.asyncio.sleep", sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await controller._poll_loop()
+
+        asyncio.run(run_once())
+
+        sleep.assert_called_once_with(0.25)
+
+    def test_connected_controller_keeps_responsive_poll_frequency(self):
+        controller = self.make_controller()
+        controller.connected = True
+        controller._read_xinput_state = Mock(return_value=(0, 0, 0, 0, 0, 0, 0))
+        controller._read_dinput_state = Mock()
+        sleep = Mock(side_effect=asyncio.CancelledError)
+
+        async def run_once():
+            with patch("mytunes.main.asyncio.sleep", sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await controller._poll_loop()
+
+        asyncio.run(run_once())
+
+        controller._read_dinput_state.assert_not_called()
+        sleep.assert_called_once_with(0.05)
+
+    def test_header_shows_shoulder_badges_in_controller_mode(self):
+        nav = PivotNav(
+            sections=["Now Playing", "Music"],
+            active_index=0,
+            theme=MetroTheme(),
+            on_section_change=Mock(),
+        )
+        nav.set_controller_mode(True)
+
+        self.assertTrue(nav.left_shoulder_hint.visible)
+        self.assertTrue(nav.right_shoulder_hint.visible)
+        self.assertEqual(nav.left_shoulder_hint.content.value, "LB")
+        self.assertEqual(nav.right_shoulder_hint.content.value, "RB")
+
+        nav.set_controller_mode(False)
+        self.assertFalse(nav.left_shoulder_hint.visible)
+        self.assertFalse(nav.right_shoulder_hint.visible)
+
+    def test_header_click_batches_style_change_with_section_update(self):
+        on_section_change = Mock()
+        nav = PivotNav(
+            sections=["Now Playing", "Music"],
+            active_index=0,
+            theme=MetroTheme(),
+            on_section_change=on_section_change,
+        )
+
+        with patch("mytunes.ui.components.pivot_nav.safe_update") as update:
+            nav._on_item_click(1)
+
+        self.assertEqual(nav.active_index, 1)
+        on_section_change.assert_called_once_with(1)
+        update.assert_not_called()
 
     def test_x_button_opens_and_activates_selected_song_menu(self):
         selected = []
@@ -320,6 +460,34 @@ class TestControllerNavigation(unittest.TestCase):
         self.assertEqual(queue.current_index, 1)
         self.assertEqual(session.selected_index, 1)
         audio.play_track.assert_called_once_with(queue.queue[1])
+
+    def test_queue_selection_scrolls_selected_item_into_view(self):
+        queue = QueueManager()
+        tracks = [
+            Track(id=str(index), title=f"Track {index}", artist="Artist")
+            for index in range(3)
+        ]
+        queue.set_queue(tracks, start_index=0)
+        queue_list = ft.ReorderableListView()
+        queue_list.scroll_to = Mock()
+        page = Mock()
+        session = QueueControllerSession(
+            queue,
+            SimpleNamespace(play_track=Mock()),
+            page,
+            ft.AlertDialog(),
+            queue_list,
+            Mock(),
+            selected_index=0,
+        )
+
+        session.move_selection(1)
+
+        page.run_task.assert_called_once_with(
+            queue_list.scroll_to,
+            scroll_key="queue-item-1-1",
+            duration=220,
+        )
 
 
 if __name__ == "__main__":

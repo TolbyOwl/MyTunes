@@ -31,8 +31,27 @@ class PivotNav(ft.Container):
             icon_color=self._mt.text_secondary,
             on_click=lambda e: None,
         )
+        self.left_shoulder_hint = self._controller_shoulder_badge("LB")
+        self.right_shoulder_hint = self._controller_shoulder_badge("RB")
 
         self._build_nav()
+
+    def _controller_shoulder_badge(self, label: str) -> ft.Container:
+        return ft.Container(
+            width=28,
+            height=22,
+            visible=False,
+            alignment=ft.Alignment.CENTER,
+            border=ft.Border.all(1, self._mt.current_accent),
+            border_radius=5,
+            content=ft.Text(
+                label,
+                size=10,
+                weight=ft.FontWeight.BOLD,
+                color=self._mt.current_accent,
+                text_align=ft.TextAlign.CENTER,
+            ),
+        )
 
     def _build_nav(self) -> None:
         self.padding = ft.Padding.only(left=28, right=28, top=16, bottom=12)
@@ -52,12 +71,14 @@ class PivotNav(ft.Container):
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
+                self.left_shoulder_hint,
                 ft.Row(
                     spacing=32,
                     alignment=ft.MainAxisAlignment.START,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     controls=self.header_buttons,
                 ),
+                self.right_shoulder_hint,
                 self.fullscreen_button,
             ],
         )
@@ -98,13 +119,13 @@ class PivotNav(ft.Container):
     def _on_item_click(self, index: int) -> None:
         if index != self.active_index:
             self.active_index = index
-            self._update_styles()
+            self._update_styles(update=False)
             self.on_section_change(index)
 
-    def set_active_index(self, index: int) -> None:
+    def set_active_index(self, index: int, *, update: bool = True) -> None:
         if 0 <= index < len(self.sections):
             self.active_index = index
-            self._update_styles()
+            self._update_styles(update=update)
 
     def set_fullscreen(self, enabled: bool) -> None:
         self.fullscreen_button.icon = (
@@ -117,7 +138,12 @@ class PivotNav(ft.Container):
         )
         safe_update(self.fullscreen_button)
 
-    def _update_styles(self) -> None:
+    def set_controller_mode(self, enabled: bool) -> None:
+        self.left_shoulder_hint.visible = enabled
+        self.right_shoulder_hint.visible = enabled
+        safe_update(self)
+
+    def _update_styles(self, *, update: bool = True) -> None:
         for idx, text_ctrl in enumerate(self.header_texts):
             is_active = (idx == self.active_index)
             text_ctrl.size = 22 if is_active else 18
@@ -126,4 +152,5 @@ class PivotNav(ft.Container):
             indicator = self.header_indicators[idx]
             indicator.width = 28 if is_active else 0
             indicator.opacity = 1 if is_active else 0
-        safe_update(self)
+        if update:
+            safe_update(self)

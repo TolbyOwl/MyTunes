@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from concurrent.futures import Future
 import inspect
 import logging
 import time
@@ -197,7 +198,7 @@ class AudioEngine:
         self.total_duration: float = 0.0
 
         # Task that polls VLC position every second to drive the progress bar
-        self._poll_task: Optional[asyncio.Task] = None
+        self._poll_task: Optional[Future[None]] = None
 
         # Sleep timer
         self.sleep_state = SleepTimerState()
@@ -377,7 +378,6 @@ class AudioEngine:
 
         if self.on_state_changed:
             self.on_state_changed(True)
-        self.app_page.update()
 
     def restore_paused_track(self, track: Track, position_seconds: float) -> None:
         """Loads a saved track, leaves it paused, and seeks once VLC has media metadata."""
@@ -419,11 +419,7 @@ class AudioEngine:
     def _start_poll(self) -> None:
         """Start the position-polling loop if it isn't already running."""
         self._stop_poll()
-        try:
-            self._poll_task = asyncio.get_event_loop().create_task(self._poll_position())
-        except RuntimeError:
-            # No running event loop yet; Flet will schedule it once the page loop starts
-            self._run_async(self._poll_position)
+        self._poll_task = self.app_page.run_task(self._poll_position)
 
     def _stop_poll(self) -> None:
         """Cancel any active polling task."""
@@ -471,7 +467,6 @@ class AudioEngine:
             self._start_poll()
             if self.on_state_changed:
                 self.on_state_changed(True)
-            self.app_page.update()
 
     def pause(self) -> None:
         if self.audio:
@@ -480,7 +475,6 @@ class AudioEngine:
             self._stop_poll()
             if self.on_state_changed:
                 self.on_state_changed(False)
-            self.app_page.update()
 
     def stop(self) -> None:
         if self.audio:
@@ -489,7 +483,6 @@ class AudioEngine:
             self._stop_poll()
             self.current_position = 0.0
             self._notify_stopped()
-            self.app_page.update()
 
     def seek(self, position_seconds: float) -> None:
         if self.audio:
@@ -502,7 +495,6 @@ class AudioEngine:
         self.volume = max(0.0, min(1.0, vol))
         if self.audio and not self.is_muted:
             self.audio.volume = self.volume
-            self.app_page.update()
         if self.on_volume_changed:
             self.on_volume_changed(0.0 if self.is_muted else self.volume)
 
@@ -510,7 +502,6 @@ class AudioEngine:
         self.is_muted = not self.is_muted
         if self.audio:
             self.audio.volume = 0.0 if self.is_muted else self.volume
-            self.app_page.update()
         if self.on_volume_changed:
             self.on_volume_changed(0.0 if self.is_muted else self.volume)
 
@@ -518,7 +509,6 @@ class AudioEngine:
         self.playback_rate = max(0.5, min(2.5, rate))
         if self.audio:
             self.audio.playback_rate = self.playback_rate
-            self.app_page.update()
 
     # --- Sleep Timer with 'Finish Current Song' ---
 

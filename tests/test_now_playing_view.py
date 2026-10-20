@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import flet as ft
 
@@ -193,6 +193,25 @@ class TestNowPlayingView(unittest.TestCase):
             ),
             original_colors,
         )
+
+    def test_down_from_controller_tools_row_focuses_volume_slider(self):
+        self.view.update_track(Track(id="track-1", title="Song", duration=180))
+        focusables = self.view.controller_focusables()
+        lyrics_index = focusables.index(self.view.lyrics_button)
+
+        next_index = self.view.move_controller_focus(
+            lyrics_index,
+            direction=1,
+            horizontal=False,
+        )
+
+        self.assertIs(focusables[next_index], self.view.volume_slider)
+
+    def test_track_update_can_defer_control_update_for_page_batching(self):
+        with patch("mytunes.ui.views.now_playing_view.safe_update") as update:
+            self.view.update_track(None, update_ui=False)
+
+        update.assert_not_called()
 
 
 if __name__ == "__main__":

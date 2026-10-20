@@ -1,6 +1,7 @@
+import asyncio
 import sqlite3
 import flet as ft
-from typing import List, Callable, Optional
+from typing import Callable, List, Optional
 from mytunes.models.radio import RadioStation
 from mytunes.providers.radio import RadioProvider
 from mytunes.ui.theme import MetroTheme
@@ -27,12 +28,17 @@ class RadioView(ft.Container):
         self.on_play_station = on_play_station
         self.stations: List[RadioStation] = []
         self.current_tab: str = "explore"  # "explore" or "favorites"
+        self._request_generation = 0
+        self._featured_loaded = False
 
         self.expand = True
         self.padding = ft.Padding.all(24)
 
         self._build_view()
-        self.load_featured()
+
+    def ensure_featured_loaded(self) -> None:
+        if not self._featured_loaded and self.current_tab == "explore":
+            self.load_featured()
 
     def _build_view(self) -> None:
         self.search_input = ft.TextField(
@@ -134,6 +140,7 @@ class RadioView(ft.Container):
 
     def load_favorites(self) -> None:
         """Loads favorited radio stations from SQLite database."""
+        self._request_generation += 1
         self.stations_grid.controls = [
             ft.Container(alignment=ft.Alignment.CENTER, padding=20, content=ft.ProgressRing())
         ]
@@ -166,28 +173,49 @@ class RadioView(ft.Container):
         self._render_stations()
 
     def load_featured(self) -> None:
-        self.stations_grid.controls = [
-            ft.Container(alignment=ft.Alignment.CENTER, padding=20, content=ft.ProgressRing())
-        ]
-        safe_update(self)
-
-        fetched = self.provider.get_top_stations(limit=30)
-        fav_urls = self._get_favorite_urls()
-        for s in fetched:
-            s.is_favorite = s.stream_url in fav_urls
-        self.stations = fetched
-        self._render_stations()
+        self._load_remote_stations(
+            lambda: self.provider.get_top_stations(limit=30),
+            featured=True,
+        )
 
     def _filter_by_tag(self, tag: str) -> None:
+        self._load_remote_stations(
+            lambda: self.provider.search_stations(tag=tag.lower(), limit=30)
+        )
+
+    def _load_remote_stations(
+        self,
+        fetch: Callable[[], List[RadioStation]],
+        *,
+        featured: bool = False,
+    ) -> None:
+        self._request_generation += 1
+        request_generation = self._request_generation
         self.stations_grid.controls = [
             ft.Container(alignment=ft.Alignment.CENTER, padding=20, content=ft.ProgressRing())
         ]
         safe_update(self)
-        fetched = self.provider.search_stations(tag=tag.lower(), limit=30)
+        self.app_page.run_task(
+            self._fetch_remote_stations,
+            request_generation,
+            fetch,
+            featured,
+        )
+
+    async def _fetch_remote_stations(
+        self,
+        request_generation: int,
+        fetch: Callable[[], List[RadioStation]],
+        featured: bool = False,
+    ) -> None:
+        fetched = await asyncio.to_thread(fetch)
+        if request_generation != self._request_generation:
+            return
         fav_urls = self._get_favorite_urls()
         for s in fetched:
             s.is_favorite = s.stream_url in fav_urls
         self.stations = fetched
+        self._featured_loaded = self._featured_loaded or featured
         self._render_stations()
 
     def _do_search(self) -> None:
@@ -205,6 +233,7 @@ class RadioView(ft.Container):
         safe_update(self)
 
         if self.current_tab == "favorites":
+            self._request_generation += 1
             # Search within favorites
             q_lower = query.lower()
             fav_urls = self._get_favorite_urls()
@@ -228,11 +257,10 @@ class RadioView(ft.Container):
                         ))
             self.stations = fav_stations
         else:
-            fetched = self.provider.search_stations(name=query, limit=30)
-            fav_urls = self._get_favorite_urls()
-            for s in fetched:
-                s.is_favorite = s.stream_url in fav_urls
-            self.stations = fetched
+            self._load_remote_stations(
+                lambda: self.provider.search_stations(name=query, limit=30)
+            )
+            return
 
         self._render_stations()
 

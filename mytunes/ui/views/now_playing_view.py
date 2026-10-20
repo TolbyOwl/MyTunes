@@ -371,6 +371,85 @@ class NowPlayingView(ft.Container):
             if control.visible and not control.disabled
         ]
 
+    def move_controller_focus(
+        self,
+        current_index: int,
+        direction: int,
+        horizontal: bool,
+    ) -> int:
+        focusables = self.controller_focusables()
+        if not focusables:
+            return -1
+
+        rows = [
+            [self.artist_button, self.album_button],
+            [self.progress_slider],
+            [
+                self.shuffle_button,
+                self.previous_button,
+                self.play_button,
+                self.next_button,
+                self.repeat_button,
+                self.favorite_button,
+            ],
+            [
+                self.lyrics_button,
+                self.speed_button,
+                self.eq_button,
+                self.sleep_button,
+                self.queue_button,
+            ],
+            [self.volume_button, self.volume_slider],
+        ]
+        rows = [
+            [control for control in row if control in focusables]
+            for row in rows
+        ]
+        rows = [row for row in rows if row]
+
+        if not 0 <= current_index < len(focusables):
+            return 0
+
+        current = focusables[current_index]
+        current_row_index = next(
+            row_index
+            for row_index, row in enumerate(rows)
+            if current in row
+        )
+        current_row = rows[current_row_index]
+        current_column_index = current_row.index(current)
+        if horizontal:
+            return focusables.index(
+                current_row[
+                    min(
+                        len(current_row) - 1,
+                        max(0, current_column_index + direction),
+                    )
+                ]
+            )
+
+        target_row_index = min(
+            len(rows) - 1,
+            max(0, current_row_index + direction),
+        )
+        target_row = rows[target_row_index]
+        if (
+            current
+            in (
+                self.lyrics_button,
+                self.speed_button,
+                self.eq_button,
+                self.sleep_button,
+                self.queue_button,
+            )
+            and direction > 0
+            and self.volume_slider in target_row
+        ):
+            return focusables.index(self.volume_slider)
+        column_position = current_column_index / max(1, len(current_row) - 1)
+        target_column_index = round(column_position * (len(target_row) - 1))
+        return focusables.index(target_row[target_column_index])
+
     def set_controller_focus(self, index: int) -> Optional[ft.Control]:
         if self._controller_focus_control is not None:
             self._restore_controller_focus()
@@ -431,7 +510,12 @@ class NowPlayingView(ft.Container):
         self._controller_focus_control = None
         self._controller_focus_original = None
 
-    def update_track(self, track: Optional[Track]) -> None:
+    def update_track(
+        self,
+        track: Optional[Track],
+        *,
+        update_ui: bool = True,
+    ) -> None:
         self._track_token += 1
         token = self._track_token
         if track is None:
@@ -455,7 +539,8 @@ class NowPlayingView(ft.Container):
             self._is_radio = False
             self.time_current.value = "0:00"
             self.time_total.value = "0:00"
-            safe_update(self)
+            if update_ui:
+                safe_update(self)
             return
 
         self.current_track = track
@@ -523,7 +608,8 @@ class NowPlayingView(ft.Container):
                 daemon=True,
             ).start()
 
-        safe_update(self)
+        if update_ui:
+            safe_update(self)
 
     def _fetch_artist_image(
         self,

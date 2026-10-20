@@ -68,5 +68,31 @@ class TestSleepTimer(unittest.TestCase):
         engine.play_track.assert_called_once_with(track2)
         self.assertEqual(qm.current_track, track2)
 
+    def test_position_poll_is_scheduled_on_the_page_event_loop(self):
+        page = MagicMock()
+        engine = AudioEngine(page, QueueManager())
+
+        async def schedule_poll():
+            engine._start_poll()
+
+        asyncio.run(schedule_poll())
+
+        page.run_task.assert_called_once_with(engine._poll_position)
+        page.run_task.return_value.cancel.assert_not_called()
+
+    def test_play_track_updates_playback_state_without_full_page_refresh(self):
+        page = MagicMock()
+        queue = QueueManager()
+        engine = AudioEngine(page, queue)
+        engine.audio = MagicMock()
+        state_changed = Mock()
+        engine.on_state_changed = state_changed
+
+        engine.play_track(Track(id="track", title="Song", file_path="song.mp3"))
+
+        state_changed.assert_called_once_with(True)
+        page.run_task.assert_called_once_with(engine._poll_position)
+        page.update.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

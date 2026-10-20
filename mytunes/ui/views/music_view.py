@@ -216,10 +216,11 @@ class MusicView(ft.Container):
         self._song_group_keys: Dict[str, ft.ScrollKey] = {}
         self.song_index_buttons: Dict[str, ft.Control] = {}
         if alpha_sorted:
-            songs_list = ft.Column(
+            songs_list = ft.ListView(
                 expand=True,
                 spacing=4,
                 scroll=ft.ScrollMode.AUTO,
+                build_controls_on_demand=True,
             )
         else:
             songs_list = ft.ListView(
