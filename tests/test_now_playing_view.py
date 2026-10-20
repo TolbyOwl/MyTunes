@@ -137,6 +137,63 @@ class TestNowPlayingView(unittest.TestCase):
 
         self.assertEqual(self.view.speed_button.content, "1.25x")
 
+    def test_controller_focus_highlights_buttons_and_restores_original_style(self):
+        track = Track(id="track-1", title="Song")
+        self.view.update_track(track)
+        focusables = self.view.controller_focusables()
+        play_button_index = focusables.index(self.view.play_button)
+        original_style = self.view.play_button.style
+        original_color = self.view.play_button.icon_color
+
+        self.view.set_controller_focus(play_button_index)
+
+        self.assertEqual(
+            self.view.play_button.style.side.color,
+            self.view._mt.current_accent,
+        )
+        self.assertEqual(self.view.play_button.icon_color, self.view._mt.current_accent)
+
+        self.view.set_controller_focus(-1)
+
+        self.assertIs(self.view.play_button.style, original_style)
+        self.assertEqual(self.view.play_button.icon_color, original_color)
+
+    def test_controller_focus_highlights_slider_and_restores_original_colors(self):
+        track = Track(id="track-1", title="Song", duration=180)
+        self.view.update_track(track)
+        focusables = self.view.controller_focusables()
+        slider_index = focusables.index(self.view.progress_slider)
+        original_colors = (
+            self.view.progress_slider.active_color,
+            self.view.progress_slider.inactive_color,
+            self.view.progress_slider.thumb_color,
+            self.view.progress_slider.overlay_color,
+        )
+
+        self.view.set_controller_focus(slider_index)
+
+        self.assertEqual(self.view.progress_slider.active_color, ft.Colors.WHITE)
+        self.assertEqual(
+            self.view.progress_slider.inactive_color,
+            self.view._mt.current_accent,
+        )
+        self.assertEqual(
+            self.view.progress_slider.thumb_color,
+            self.view._mt.current_accent,
+        )
+
+        self.view.set_controller_focus(-1)
+
+        self.assertEqual(
+            (
+                self.view.progress_slider.active_color,
+                self.view.progress_slider.inactive_color,
+                self.view.progress_slider.thumb_color,
+                self.view.progress_slider.overlay_color,
+            ),
+            original_colors,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

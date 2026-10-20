@@ -446,23 +446,26 @@ class XInputController:
             return
 
         if self.pivot_nav.active_index == 0:
-            view = self.views[0]
-            focusables = view.controller_focusables()
-            if not focusables:
-                return
-            if self._now_playing_focus_index < 0:
-                self._now_playing_focus_index = 0
-            else:
-                self._now_playing_focus_index = min(
-                    len(focusables) - 1,
-                    max(0, self._now_playing_focus_index + direction),
-                )
-            view.set_controller_focus(self._now_playing_focus_index)
+            self._move_now_playing_focus(direction)
             return
 
         focus_root = self.views[self.pivot_nav.active_index]
         self._sync_focus_root(focus_root)
         self._move_generic_focus(focus_root, direction)
+
+    def _move_now_playing_focus(self, direction: int) -> None:
+        view = self.views[0]
+        focusables = view.controller_focusables()
+        if not focusables:
+            return
+        if self._now_playing_focus_index < 0:
+            self._now_playing_focus_index = 0
+        else:
+            self._now_playing_focus_index = min(
+                len(focusables) - 1,
+                max(0, self._now_playing_focus_index + direction),
+            )
+        view.set_controller_focus(self._now_playing_focus_index)
 
     def _move_generic_focus(self, root: ft.Control, direction: int) -> None:
         self._focus_items = self._collect_focus_items(root)
@@ -546,7 +549,10 @@ class XInputController:
             return
         view = self.views[0]
         focusables = view.controller_focusables()
+        if not focusables:
+            return
         if not 0 <= self._now_playing_focus_index < len(focusables):
+            self._move_now_playing_focus(direction)
             return
 
         selected = focusables[self._now_playing_focus_index]
@@ -561,6 +567,8 @@ class XInputController:
             self.audio_engine.seek(position)
         elif selected is view.volume_slider:
             self._adjust_volume(direction * 0.05)
+        else:
+            self._move_now_playing_focus(direction)
 
     def _change_track(self, direction: int) -> None:
         track = self.queue_manager.prev_track() if direction < 0 else self.queue_manager.next_track()
@@ -827,8 +835,7 @@ class XInputController:
             )
             for index, item in enumerate(self._controller_menu_items)
         ]
-        if dialog.page is not None:
-            dialog.update()
+        safe_update(dialog)
 
     @staticmethod
     def _menu_item_label(item: Any) -> str:

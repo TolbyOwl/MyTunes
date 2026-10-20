@@ -68,7 +68,7 @@ class NowPlayingView(ft.Container):
         self._is_radio = False
         self._portrait_refreshes: set[str] = set()
         self._controller_focus_control: Optional[ft.Control] = None
-        self._controller_focus_original: Optional[tuple[str, object]] = None
+        self._controller_focus_original: Optional[dict[str, object]] = None
         self.expand = True
         self._build_view()
 
@@ -382,15 +382,41 @@ class NowPlayingView(ft.Container):
 
         control = controls[index]
         self._controller_focus_control = control
+        accent = self._mt.current_accent
         if isinstance(control, ft.IconButton):
-            self._controller_focus_original = ("icon_color", control.icon_color)
-            control.icon_color = self._mt.current_accent
+            self._controller_focus_original = {
+                "icon_color": control.icon_color,
+                "style": control.style,
+            }
+            control.icon_color = accent
+            control.style = ft.ButtonStyle(
+                bgcolor=ft.Colors.with_opacity(0.22, accent),
+                side=ft.BorderSide(2, accent),
+                shape=ft.RoundedRectangleBorder(radius=10),
+                shadow_color=accent,
+                elevation=8,
+            )
         elif isinstance(control, ft.Slider):
-            self._controller_focus_original = ("active_color", control.active_color)
+            self._controller_focus_original = {
+                "active_color": control.active_color,
+                "inactive_color": control.inactive_color,
+                "thumb_color": control.thumb_color,
+                "overlay_color": control.overlay_color,
+            }
             control.active_color = ft.Colors.WHITE
+            control.inactive_color = accent
+            control.thumb_color = accent
+            control.overlay_color = ft.Colors.with_opacity(0.3, accent)
         elif isinstance(control, ft.TextButton):
-            self._controller_focus_original = ("style", control.style)
-            control.style = ft.ButtonStyle(color=self._mt.current_accent)
+            self._controller_focus_original = {"style": control.style}
+            control.style = ft.ButtonStyle(
+                color=accent,
+                bgcolor=ft.Colors.with_opacity(0.22, accent),
+                side=ft.BorderSide(2, accent),
+                shape=ft.RoundedRectangleBorder(radius=10),
+                shadow_color=accent,
+                elevation=8,
+            )
         safe_update(control)
         return control
 
@@ -399,8 +425,8 @@ class NowPlayingView(ft.Container):
         original = getattr(self, "_controller_focus_original", None)
         if control is None or original is None:
             return
-        attribute, value = original
-        setattr(control, attribute, value)
+        for attribute, value in original.items():
+            setattr(control, attribute, value)
         safe_update(control)
         self._controller_focus_control = None
         self._controller_focus_original = None

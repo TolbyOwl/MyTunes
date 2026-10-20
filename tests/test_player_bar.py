@@ -56,6 +56,8 @@ class TestPlayerBarNavigation(unittest.TestCase):
         self.assertFalse(player.btn_eq.visible)
         self.assertFalse(player.btn_shuffle.visible)
         self.assertTrue(player.btn_play.visible)
+        self.assertFalse(player.time_current.visible)
+        self.assertFalse(player.time_total.visible)
 
         player.set_controller_mode(False)
 
@@ -63,6 +65,8 @@ class TestPlayerBarNavigation(unittest.TestCase):
         self.assertTrue(player.btn_sleep.visible)
         self.assertTrue(player.btn_eq.visible)
         self.assertTrue(player.btn_shuffle.visible)
+        self.assertTrue(player.time_current.visible)
+        self.assertTrue(player.time_total.visible)
 
     def test_artist_and_album_buttons_forward_current_track(self):
         queue = QueueManager()

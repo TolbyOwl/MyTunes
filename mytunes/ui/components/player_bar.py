@@ -412,6 +412,8 @@ class PlayerBar(ft.Container):
                 "fav": self.fav_button.visible,
                 "shuffle": self.btn_shuffle.visible,
                 "repeat": self.btn_repeat.visible,
+                "time_current": self.time_current.visible,
+                "time_total": self.time_total.visible,
             }
         self._controller_mode = enabled
         self.controller_overlay.visible = enabled
@@ -427,6 +429,8 @@ class PlayerBar(ft.Container):
             self.fav_button.visible = False
             self.btn_shuffle.visible = False
             self.btn_repeat.visible = False
+            self.time_current.visible = False
+            self.time_total.visible = False
             self.height = 126
         else:
             self.btn_lyrics.visible = self._controller_visible_state.get("lyrics", True)
@@ -439,6 +443,12 @@ class PlayerBar(ft.Container):
             self.fav_button.visible = self._controller_visible_state.get("fav", True)
             self.btn_shuffle.visible = self._controller_visible_state.get("shuffle", True)
             self.btn_repeat.visible = self._controller_visible_state.get("repeat", True)
+            self.time_current.visible = self._controller_visible_state.get(
+                "time_current", True
+            )
+            self.time_total.visible = self._controller_visible_state.get(
+                "time_total", True
+            )
             self.height = 102
         safe_update(self)
 
