@@ -106,6 +106,17 @@ class PivotNav(ft.Container):
             self.active_index = index
             self._update_styles()
 
+    def set_fullscreen(self, enabled: bool) -> None:
+        self.fullscreen_button.icon = (
+            ft.Icons.FULLSCREEN_EXIT if enabled else ft.Icons.FULLSCREEN
+        )
+        self.fullscreen_button.tooltip = (
+            "Exit borderless fullscreen"
+            if enabled
+            else "Enter borderless fullscreen"
+        )
+        safe_update(self.fullscreen_button)
+
     def _update_styles(self) -> None:
         for idx, text_ctrl in enumerate(self.header_texts):
             is_active = (idx == self.active_index)

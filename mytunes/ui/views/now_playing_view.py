@@ -11,6 +11,7 @@ from mytunes.models.track import Track
 from mytunes.providers.metadata import ArtistMetadataProvider
 from mytunes.ui.dialog_utils import safe_update
 from mytunes.ui.theme import MetroTheme
+from mytunes.ui.components.controller_hints import build_controller_hints
 
 
 class NowPlayingView(ft.Container):
@@ -66,6 +67,8 @@ class NowPlayingView(ft.Container):
         self._is_seekable = False
         self._is_radio = False
         self._portrait_refreshes: set[str] = set()
+        self._controller_focus_control: Optional[ft.Control] = None
+        self._controller_focus_original: Optional[tuple[str, object]] = None
         self.expand = True
         self._build_view()
 
@@ -177,14 +180,14 @@ class NowPlayingView(ft.Container):
             tooltip="Repeat Mode",
             on_click=self._toggle_repeat,
         )
-        previous_button = ft.IconButton(
+        self.previous_button = ft.IconButton(
             icon=ft.Icons.SKIP_PREVIOUS,
             icon_size=38,
             icon_color=ft.Colors.WHITE,
             tooltip="Previous",
             on_click=lambda e: self.on_previous(),
         )
-        next_button = ft.IconButton(
+        self.next_button = ft.IconButton(
             icon=ft.Icons.SKIP_NEXT,
             icon_size=38,
             icon_color=ft.Colors.WHITE,
@@ -266,9 +269,9 @@ class NowPlayingView(ft.Container):
                     spacing=12,
                     controls=[
                         self.shuffle_button,
-                        previous_button,
+                        self.previous_button,
                         self.play_button,
-                        next_button,
+                        self.next_button,
                         self.repeat_button,
                         self.favorite_button,
                     ],
@@ -306,8 +309,101 @@ class NowPlayingView(ft.Container):
                     padding=24,
                     content=content,
                 ),
+                self._build_controller_overlay(),
             ],
         )
+
+    def _build_controller_overlay(self) -> ft.Container:
+        self.controller_hints = ft.Row(
+            spacing=8,
+            wrap=True,
+            alignment=ft.MainAxisAlignment.END,
+            controls=[],
+        )
+        self.controller_overlay = ft.Container(
+            visible=False,
+            left=0,
+            right=0,
+            bottom=0,
+            alignment=ft.Alignment(1, 1),
+            padding=12,
+            content=self.controller_hints,
+        )
+        return self.controller_overlay
+
+    def set_controller_mode(
+        self,
+        enabled: bool,
+        hints: Optional[dict[str, str]] = None,
+    ) -> None:
+        self.controller_overlay.visible = enabled
+        self.controller_hints.controls = build_controller_hints(
+            hints or {},
+            ft.Colors.WHITE,
+        )
+        self.controller_hints.visible = enabled
+        if not enabled:
+            self.set_controller_focus(-1)
+        safe_update(self)
+
+    def controller_focusables(self) -> list[ft.Control]:
+        candidates: list[ft.Control] = [
+            self.artist_button,
+            self.album_button,
+            self.progress_slider,
+            self.shuffle_button,
+            self.previous_button,
+            self.play_button,
+            self.next_button,
+            self.repeat_button,
+            self.favorite_button,
+            self.lyrics_button,
+            self.speed_button,
+            self.eq_button,
+            self.sleep_button,
+            self.queue_button,
+            self.volume_button,
+            self.volume_slider,
+        ]
+        return [
+            control
+            for control in candidates
+            if control.visible and not control.disabled
+        ]
+
+    def set_controller_focus(self, index: int) -> Optional[ft.Control]:
+        if self._controller_focus_control is not None:
+            self._restore_controller_focus()
+
+        controls = self.controller_focusables()
+        if index < 0 or index >= len(controls):
+            self._controller_focus_control = None
+            return None
+
+        control = controls[index]
+        self._controller_focus_control = control
+        if isinstance(control, ft.IconButton):
+            self._controller_focus_original = ("icon_color", control.icon_color)
+            control.icon_color = self._mt.current_accent
+        elif isinstance(control, ft.Slider):
+            self._controller_focus_original = ("active_color", control.active_color)
+            control.active_color = ft.Colors.WHITE
+        elif isinstance(control, ft.TextButton):
+            self._controller_focus_original = ("style", control.style)
+            control.style = ft.ButtonStyle(color=self._mt.current_accent)
+        safe_update(control)
+        return control
+
+    def _restore_controller_focus(self) -> None:
+        control = self._controller_focus_control
+        original = getattr(self, "_controller_focus_original", None)
+        if control is None or original is None:
+            return
+        attribute, value = original
+        setattr(control, attribute, value)
+        safe_update(control)
+        self._controller_focus_control = None
+        self._controller_focus_original = None
 
     def update_track(self, track: Optional[Track]) -> None:
         self._track_token += 1

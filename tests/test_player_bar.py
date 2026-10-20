@@ -23,7 +23,8 @@ class TestPlayerBarNavigation(unittest.TestCase):
             lambda: None,
             lambda: None,
         )
-        track_info = player.content.controls[0].controls[1]
+        player_row = player.content.controls[1]
+        track_info = player_row.controls[0].controls[1]
         metadata_row = track_info.controls[1]
 
         self.assertEqual(track_info.width, 200)
@@ -31,6 +32,37 @@ class TestPlayerBarNavigation(unittest.TestCase):
         self.assertEqual(metadata_row.scroll, ft.ScrollMode.AUTO)
         self.assertTrue(player.track_artist_label.no_wrap)
         self.assertTrue(player.track_album_label.no_wrap)
+
+    def test_controller_mode_shows_button_badges_and_restores_player_controls(self):
+        player = PlayerBar(
+            MagicMock(),
+            MagicMock(),
+            QueueManager(),
+            MetroTheme(),
+            lambda: None,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+        )
+
+        player.set_controller_mode(True)
+        player.set_controller_hints({"A": "Confirm", "Back": "Fullscreen"})
+
+        self.assertTrue(player.controller_overlay.visible)
+        self.assertIsInstance(player.controller_hints.controls[0], ft.Row)
+        self.assertFalse(player.btn_lyrics.visible)
+        self.assertFalse(player.btn_sleep.visible)
+        self.assertFalse(player.btn_eq.visible)
+        self.assertFalse(player.btn_shuffle.visible)
+        self.assertTrue(player.btn_play.visible)
+
+        player.set_controller_mode(False)
+
+        self.assertTrue(player.btn_lyrics.visible)
+        self.assertTrue(player.btn_sleep.visible)
+        self.assertTrue(player.btn_eq.visible)
+        self.assertTrue(player.btn_shuffle.visible)
 
     def test_artist_and_album_buttons_forward_current_track(self):
         queue = QueueManager()
