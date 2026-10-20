@@ -184,7 +184,7 @@ class MusicView(ft.Container):
         elif self.current_sort == "date_desc":
             tracks = sorted(tracks, key=lambda t: t.date_added or 0.0, reverse=True)
         elif self.current_sort == "date_asc":
-            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0)
+            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0) 
         else:  # alpha_asc default
             tracks = sorted(tracks, key=lambda t: (t.title or "").lower())
 

@@ -1,0 +1,28 @@
+Implementing controller support on Music player. X-input and D-input. 
+The document provides specifications for X-input, apply the equivalente to and D-input device. 
+
+Main button functions: 
+
+1. Quick navigation through tabs left and right - LB & RB;
+2. Navigate up and down through lists (songs, albums, episodes, etc) - Left analog;
+3. Confirm selected item/equivalent to left click on mouse - A button;
+4. Equivalent to "<-- Back" - B button;
+5. Pressing the 3 dots button - "X" button;
+6. See the player queue - "Start" button;
+7. Go back or forward 10 seconds - LT & RT;
+8. Quick access to search bar of the current tab - "Y" button;
+9. Control player volume - D-pad up and down;
+10. Previous and next song - D-pad left and right;
+11. On Now Playing, when navigating through the lyrics using the left analog, pressing "A" will do the same as the mouse left click, "B" will either resume autoscroll if the user is scrolling using left analog or leave the lyrics screen;
+12. When the player queue is open the user can use the left analog to navigate, "A" to play and right analog to move the song up or down.
+
+- On "Now Playing" Let's be able to navigate through each element/button/slider using Left analog. When selecting the volume or playblack progress, lets be able to slide them back/forward by moving the analog left and right;
+
+- When a controller is connect, let's have our interface show the buttons overlay beside each relevant button. And for general navigation button, like "A", "B", "Y", "X" and "back" let's have then on a small overlay right above the right top side of our player bar (or just right bottom side on the Now Playing);
+
+- When a controller is connected, let's simplify the player bar, hiding button not mapped to our controller, like lyrics/playback speed, timer and equilizer;
+
+- When a controller is disconnected or the user starts moving their mouse to Interact, let's reverse the controller mode;
+
+- Finally let's add on the top right corner of the app a fullscreen button and map it to "Back"/"Select". For code implementation purposes, considerer fullscreen as a borderless Window mode. 
+
