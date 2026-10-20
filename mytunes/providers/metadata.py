@@ -80,7 +80,7 @@ class ArtistMetadataProvider:
             pass
         return None
 
-    def fetch_and_cache(self, artist_name: str) -> Dict:
+    def fetch_and_cache(self, artist_name: str, force_refresh: bool = False) -> Dict:
         """
         Fetches artist image and fans from Deezer,
         bio from Last.fm (retaining 'Read more on Last.fm' with link, and Wikipedia fallback),
@@ -92,7 +92,9 @@ class ArtistMetadataProvider:
 
         # Check existing cache first
         cached = self.get_cached_metadata(artist_name)
-        if cached and (cached.get("picture_url") or cached.get("bio")):
+        if not force_refresh and cached and (
+            cached.get("picture_url") or cached.get("bio")
+        ):
             return cached
 
         picture_url = None
@@ -120,7 +122,11 @@ class ArtistMetadataProvider:
 
                     if best_match:
                         deezer_id = best_match.get("id")
-                        picture_url = best_match.get("picture_big") or best_match.get("picture_xl") or best_match.get("picture")
+                        picture_url = (
+                            best_match.get("picture_xl")
+                            or best_match.get("picture_big")
+                            or best_match.get("picture")
+                        )
                         picture_medium = best_match.get("picture_medium") or picture_url
                         nb_fan = best_match.get("nb_fan", 0)
         except Exception:

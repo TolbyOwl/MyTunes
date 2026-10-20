@@ -11,6 +11,7 @@ from mytunes.models.track import Track
 from mytunes.models.radio import RadioStation
 from mytunes.models.podcast import Episode, PodcastShow
 from mytunes.providers.local import LocalProvider
+from mytunes.providers.metadata import ArtistMetadataProvider
 from mytunes.sync.sync_manager import SyncManager
 from mytunes.core.queue import QueueManager
 from mytunes.core.audio import AudioEngine
@@ -25,6 +26,7 @@ from mytunes.ui.components.quick_mix_dialog import QuickMixDialog
 from mytunes.ui.components.lyrics_view import LyricsView
 from mytunes.ui.views.music_view import MusicView
 from mytunes.ui.views.radio_view import RadioView
+from mytunes.ui.views.now_playing_view import NowPlayingView
 from mytunes.ui.views.podcasts_view import PodcastsView
 from mytunes.ui.views.cloud_view import CloudView
 from mytunes.ui.views.playlists_view import PlaylistsView
@@ -100,10 +102,54 @@ def main(page: ft.Page) -> None:
     # 5. Lyrics View (Toggleable)
     lyrics_view = LyricsView(page, audio_engine.seek)
     lyrics_active = False
+    artist_metadata = ArtistMetadataProvider(db_conn=db_conn)
+
+    def play_previous_track() -> None:
+        previous_track = queue_manager.prev_track()
+        if previous_track:
+            audio_engine.play_track(previous_track)
+
+    def play_next_track() -> None:
+        next_track = queue_manager.next_track()
+        if next_track:
+            audio_engine.play_track(next_track)
+
+    now_playing_view = NowPlayingView(
+        page,
+        theme,
+        artist_metadata,
+        audio_engine.toggle_play_pause,
+        play_previous_track,
+        play_next_track,
+        audio_engine.seek,
+        on_favorite=lambda: player_bar._toggle_favorite(None),
+        on_mix=lambda: open_quick_mix(),
+        on_repeat=lambda: (
+            player_bar._toggle_repeat(None),
+            queue_manager.repeat_mode,
+        )[1],
+        on_repeat_mode=lambda: queue_manager.repeat_mode,
+        on_lyrics=lambda: toggle_lyrics(),
+        on_speed=lambda: (
+            player_bar._cycle_playback_speed(None),
+            player_bar.speed_label.value,
+        )[1],
+        on_eq=lambda: eq_dialog.show(),
+        on_sleep=lambda: sleep_dialog.show(),
+        on_queue=lambda: open_queue_modal(),
+        on_volume_change=audio_engine.set_volume,
+        on_mute=lambda: (
+            player_bar._toggle_mute(None),
+            audio_engine.is_muted,
+        )[1],
+        on_artist_click=lambda artist: open_artist_in_music(artist),
+        on_album_click=lambda album, artist: open_album_in_music(album, artist),
+    )
 
     # Forward declaration for UI callbacks
     def on_track_changed(track: Track | None) -> None:
         player_bar.update_track(track)
+        now_playing_view.update_track(track)
         media_controls.update_track(track)
         if track and lyrics_active:
             lyrics_view.load_for_track(track)
@@ -113,10 +159,12 @@ def main(page: ft.Page) -> None:
 
     def on_playback_state_changed(is_playing: bool) -> None:
         player_bar.update_playback_state(is_playing)
+        now_playing_view.update_playback_state(is_playing)
         media_controls.update_playback_state(is_playing)
 
     def on_position_changed(current: float, total: float) -> None:
         player_bar.update_position(current, total)
+        now_playing_view.update_position(current, total)
         media_controls.update_position(current, total)
         persist_playback_session()
         if lyrics_active:
@@ -124,6 +172,17 @@ def main(page: ft.Page) -> None:
 
     def on_volume_changed(volume: float) -> None:
         media_controls.update_volume(volume)
+        now_playing_view.update_volume(audio_engine.volume, audio_engine.is_muted)
+        player_bar.volume_slider.value = audio_engine.volume
+        player_bar.btn_volume.icon = (
+            ft.Icons.VOLUME_OFF
+            if audio_engine.is_muted
+            else ft.Icons.VOLUME_MUTE
+            if audio_engine.volume == 0
+            else ft.Icons.VOLUME_DOWN
+            if audio_engine.volume < 0.5
+            else ft.Icons.VOLUME_UP
+        )
         persist_playback_session()
 
     def on_seeked(_position: float) -> None:
@@ -198,7 +257,23 @@ def main(page: ft.Page) -> None:
         nonlocal lyrics_active
         lyrics_active = not lyrics_active
         if lyrics_active:
-            content_container.content = lyrics_view
+            content_container.content = ft.Column(
+                expand=True,
+                spacing=0,
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.TextButton(
+                                "Back",
+                                icon=ft.Icons.ARROW_BACK,
+                                on_click=lambda e: toggle_lyrics(),
+                            )
+                        ],
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                    lyrics_view,
+                ],
+            )
             if queue_manager.current_track:
                 lyrics_view.load_for_track(queue_manager.current_track)
         else:
@@ -338,34 +413,49 @@ def main(page: ft.Page) -> None:
         cloud_settings,
     )
 
-    views = [view_music, view_podcasts, view_radio, view_playlists, view_settings]
+    views = [
+        now_playing_view,
+        view_music,
+        view_podcasts,
+        view_radio,
+        view_playlists,
+        view_settings,
+    ]
 
-    content_container = ft.Container(content=views[0], expand=True)
+    content_container = ft.Container(content=views[1], expand=True)
 
     def on_section_change(index: int) -> None:
         nonlocal lyrics_active
         lyrics_active = False
         content_container.content = views[index]
-        if index == 3:
+        player_bar.visible = index != 0
+        if index == 4:
             view_playlists.load_playlists()
         page.update()
 
     # 7. Metro Pivot Navigation Header
     pivot_nav = PivotNav(
-        sections=["Music", "Podcasts", "Radio", "Playlists", "Settings"],
-        active_index=0,
+        sections=[
+            "Now Playing",
+            "Music",
+            "Podcasts",
+            "Radio",
+            "Playlists",
+            "Settings",
+        ],
+        active_index=1,
         theme=theme,
         on_section_change=on_section_change
     )
 
     def open_artist_in_music(artist_name: str) -> None:
-        pivot_nav.set_active_index(0)
-        on_section_change(0)
+        pivot_nav.set_active_index(1)
+        on_section_change(1)
         view_music._open_artist_page(artist_name)
 
     def open_album_in_music(album_name: str, album_artist: str) -> None:
-        pivot_nav.set_active_index(0)
-        on_section_change(0)
+        pivot_nav.set_active_index(1)
+        on_section_change(1)
         view_music._open_album_page(album_name, album_artist)
 
     # 8. Player Bar
@@ -385,6 +475,10 @@ def main(page: ft.Page) -> None:
     )
     if saved_session:
         player_bar.volume_slider.value = saved_session.volume
+        now_playing_view.update_volume(
+            saved_session.volume,
+            saved_session.is_muted,
+        )
         player_bar.btn_volume.icon = (
             ft.Icons.VOLUME_OFF
             if saved_session.is_muted
@@ -410,6 +504,7 @@ def main(page: ft.Page) -> None:
     if saved_session:
         restored_track = queue_manager.current_track
         player_bar.update_track(restored_track)
+        now_playing_view.update_track(restored_track)
         media_controls.update_track(restored_track)
         if restored_track:
             audio_engine.restore_paused_track(
@@ -417,6 +512,7 @@ def main(page: ft.Page) -> None:
                 saved_session.position_seconds,
             )
         player_bar.update_playback_state(False)
+        now_playing_view.update_playback_state(False)
 
 if __name__ == "__main__":
     if hasattr(ft, "run"):

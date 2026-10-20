@@ -94,7 +94,7 @@ class RadioView(ft.Container):
         self.stations_grid = ft.GridView(
             expand=True,
             runs_count=3,
-            max_extent=260,
+            max_extent=200,
             child_aspect_ratio=1.6,
             spacing=12,
             run_spacing=12,
@@ -290,6 +290,22 @@ class RadioView(ft.Container):
                 self.stations_grid.controls.append(self._build_station_card(s))
         safe_update(self)
 
+    @staticmethod
+    def _display_country_name(country: str) -> str:
+        country = (country or "Global").strip()
+        normalized = country.casefold()
+        if normalized == "the united kingdom" or normalized.startswith(
+            "the united kingdom of"
+        ) or normalized.startswith("united kingdom of"):
+            return "United Kingdom"
+        if normalized == "the united states" or normalized.startswith(
+            "the united states of"
+        ) or normalized == "united states of america":
+            return "United States"
+        if normalized.startswith("the "):
+            return country[4:]
+        return country
+
     def _build_station_card(self, station: RadioStation) -> ft.Container:
         fallback_icon = ft.Container(
             bgcolor=self._mt.surface_variant,
@@ -315,7 +331,15 @@ class RadioView(ft.Container):
             spacing=2,
             controls=[
                 ft.Text(station.name, size=13, weight=ft.FontWeight.BOLD, no_wrap=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Text(f"{station.country or 'Global'} • {station.codec or 'MP3'} {station.bitrate or 128}k", size=11, color=self._mt.text_secondary),
+                ft.Text(
+                    f"{self._display_country_name(station.country)} • "
+                    f"{station.codec or 'MP3'} {station.bitrate or 128}k",
+                    size=11,
+                    color=self._mt.text_secondary,
+                    no_wrap=True,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
             ],
             expand=True
         )
@@ -335,18 +359,32 @@ class RadioView(ft.Container):
             on_click=lambda e, st=station: self.on_play_station(st)
         )
 
+        card_content = ft.Column(
+            spacing=8,
+            expand=True,
+            controls=[
+                ft.Row(
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[favicon, info_col],
+                ),
+                ft.Container(height=4),
+                ft.Row(
+                    spacing=8,
+                    alignment=ft.MainAxisAlignment.END,
+                    controls=[fav_btn, play_btn],
+                ),
+            ],
+        )
+
         return ft.Container(
             bgcolor=self._mt.surface_color,
             border=ft.Border.all(1, self._mt.border_color),
-            border_radius=4,
-            padding=10,
+            border_radius=6,
+            padding=ft.Padding.only(left=10, top=10, right=10, bottom=8),
             ink=True,
             on_click=lambda e, st=station: self.on_play_station(st),
-            content=ft.Row(
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[favicon, info_col, fav_btn, play_btn]
-            )
+            content=card_content,
         )
 
     def _show_add_custom_dialog(self, e) -> None:

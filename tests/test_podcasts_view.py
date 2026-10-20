@@ -102,6 +102,57 @@ class TestPodcastEpisodeRendering(unittest.TestCase):
         )
         self.page.run_task.assert_not_called()
 
+    def test_episode_sort_can_switch_to_oldest_first(self):
+        self.view._render_show_episodes(self.show)
+        episodes_list = self._rendered_episodes_list()
+        show_header = episodes_list.controls[1]
+        actions_row = show_header.controls[1].controls[3]
+        sort_dropdown = actions_row.controls[-1]
+
+        self.assertEqual(sort_dropdown.value, "date_desc")
+        sort_dropdown.value = "date_asc"
+        sort_dropdown.on_select(
+            ft.ControlEvent(name="select", control=sort_dropdown)
+        )
+
+        episodes_list = self._rendered_episodes_list()
+        self.assertEqual(
+            self._episode_titles(episodes_list),
+            [
+                f"Episode {index}"
+                for index in range(INITIAL_EPISODE_BATCH_SIZE)
+            ],
+        )
+        self.assertEqual(self.view._episode_sort_order, "date_asc")
+
+    def test_undated_episodes_remain_last_in_both_sort_orders(self):
+        undated_episode = Episode(
+            id="undated",
+            podcast_id="show",
+            title="Undated episode",
+        )
+        self.show.episodes = [
+            self.show.episodes[1],
+            undated_episode,
+            self.show.episodes[0],
+        ]
+
+        self.view._render_show_episodes(self.show)
+        episodes_list = self._rendered_episodes_list()
+        self.assertEqual(
+            self._episode_titles(episodes_list),
+            ["Episode 1", "Episode 0", "Undated episode"],
+        )
+
+        dropdown = episodes_list.controls[1].controls[1].controls[3].controls[-1]
+        dropdown.value = "date_asc"
+        dropdown.on_select(ft.ControlEvent(name="select", control=dropdown))
+
+        self.assertEqual(
+            self._episode_titles(self._rendered_episodes_list()),
+            ["Episode 0", "Episode 1", "Undated episode"],
+        )
+
     def test_appends_episodes_in_batches_after_scrolling_past_midpoint(self):
         self.view._render_show_episodes(self.show)
         episodes_list = self._rendered_episodes_list()

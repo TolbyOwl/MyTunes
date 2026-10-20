@@ -11,7 +11,7 @@ from mytunes.ui.dialog_utils import safe_update, show_snackbar, open_dialog, clo
 class PlaylistsView(ft.Container):
     """
     Playlists management view supporting .m3u import/export,
-    playlist creation, and cloud sync.
+    playlist creation, renaming, deletion, and track removal.
     """
 
     def __init__(
@@ -100,6 +100,9 @@ class PlaylistsView(ft.Container):
         self._render_sidebar()
         if self.selected_playlist:
             self._load_playlist_tracks(self.selected_playlist.id)
+        else:
+            self.playlist_tracks = []
+            self._render_empty_selection()
 
     def _render_sidebar(self) -> None:
         self.sidebar_list.controls.clear()
@@ -118,12 +121,123 @@ class PlaylistsView(ft.Container):
                     on_click=lambda e, pl=p: self._select_playlist(pl),
                     content=ft.Row([
                         ft.Icon(ft.Icons.PLAYLIST_PLAY, size=20, color=self._mt.current_accent if is_selected else self._mt.text_secondary),
-                        ft.Text(p.name, size=14, weight=ft.FontWeight.BOLD if is_selected else ft.FontWeight.W_400, no_wrap=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True)
+                        ft.Text(p.name, size=14, weight=ft.FontWeight.BOLD if is_selected else ft.FontWeight.W_400, no_wrap=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                        ft.PopupMenuButton(
+                            icon=ft.Icons.MORE_VERT,
+                            tooltip="Playlist options",
+                            items=[
+                                ft.PopupMenuItem(
+                                    content="Rename",
+                                    icon=ft.Icons.EDIT,
+                                    on_click=lambda e, pl=p: self._show_rename_dialog(pl),
+                                ),
+                                ft.PopupMenuItem(
+                                    content="Delete",
+                                    icon=ft.Icons.DELETE_OUTLINE,
+                                    on_click=lambda e, pl=p: self._show_delete_dialog(pl),
+                                ),
+                            ],
+                        ),
                     ], spacing=8)
                 )
                 self.sidebar_list.controls.append(item)
 
         safe_update(self)
+
+    def _render_empty_selection(self) -> None:
+        self.tracks_view.controls.clear()
+        if self.playlists:
+            message = "Select a playlist to view its tracks."
+        else:
+            message = "Create a playlist or import an .M3U file to get started."
+        self.tracks_view.controls.append(
+            ft.Container(
+                alignment=ft.Alignment.CENTER,
+                padding=40,
+                content=ft.Text(message, color=self._mt.text_secondary),
+            )
+        )
+        safe_update(self)
+
+    def _show_rename_dialog(self, playlist: Playlist) -> None:
+        name_input = ft.TextField(
+            label="Playlist Name",
+            value=playlist.name,
+            autofocus=True,
+        )
+
+        def rename_playlist(e) -> None:
+            name = (name_input.value or "").strip()
+            if not name:
+                show_snackbar(self.app_page, "Playlist name cannot be empty")
+                return
+            if name != playlist.name:
+                self.conn.execute(
+                    "UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, time.time(), playlist.id),
+                )
+                self.conn.commit()
+            close_dialog(self.app_page, self.dialog)
+            self.load_playlists()
+
+        self.dialog = ft.AlertDialog(
+            title=ft.Text("Rename Playlist", weight=ft.FontWeight.BOLD),
+            content=name_input,
+            actions=[
+                ft.TextButton(
+                    "Cancel",
+                    on_click=lambda e: close_dialog(self.app_page, self.dialog),
+                ),
+                ft.FilledButton("Save", on_click=rename_playlist),
+            ],
+        )
+        open_dialog(self.app_page, self.dialog)
+
+    def _show_delete_dialog(self, playlist: Playlist) -> None:
+        def delete_playlist(e) -> None:
+            self.conn.execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?",
+                (playlist.id,),
+            )
+            self.conn.execute("DELETE FROM playlists WHERE id = ?", (playlist.id,))
+            self.conn.commit()
+            close_dialog(self.app_page, self.dialog)
+            if self.selected_playlist and self.selected_playlist.id == playlist.id:
+                self.selected_playlist = None
+            self.load_playlists()
+
+        self.dialog = ft.AlertDialog(
+            title=ft.Text("Delete Playlist", weight=ft.FontWeight.BOLD),
+            content=ft.Text(f"Delete '{playlist.name}'? This cannot be undone."),
+            actions=[
+                ft.TextButton(
+                    "Cancel",
+                    on_click=lambda e: close_dialog(self.app_page, self.dialog),
+                ),
+                ft.FilledButton("Delete", on_click=delete_playlist),
+            ],
+        )
+        open_dialog(self.app_page, self.dialog)
+
+    def _remove_track_from_playlist(self, playlist_id: str, track_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+            (playlist_id, track_id),
+        )
+        remaining_track_ids = self.conn.execute(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ? "
+            "ORDER BY position ASC",
+            (playlist_id,),
+        ).fetchall()
+        for position, row in enumerate(remaining_track_ids):
+            self.conn.execute(
+                "UPDATE playlist_tracks SET position = ? "
+                "WHERE playlist_id = ? AND track_id = ?",
+                (position, playlist_id, row["track_id"]),
+            )
+        self.conn.commit()
+        if self.selected_playlist and self.selected_playlist.id == playlist_id:
+            self._load_playlist_tracks(playlist_id)
 
     def _select_playlist(self, playlist: Playlist) -> None:
         self.selected_playlist = playlist
@@ -180,20 +294,31 @@ class PlaylistsView(ft.Container):
                     ], expand=True),
                     ft.Text(t.formatted_duration, size=12, color=self._mt.text_secondary),
                 ]
+                menu_items = []
                 if self.on_play_next:
-                    song_controls.append(
-                        ft.PopupMenuButton(
-                            icon=ft.Icons.MORE_VERT,
-                            tooltip="Song options",
-                            items=[
-                                ft.PopupMenuItem(
-                                    content="Play Next",
-                                    icon=ft.Icons.PLAY_ARROW,
-                                    on_click=lambda e, track=t: self.on_play_next(track),
-                                )
-                            ],
+                    menu_items.append(
+                        ft.PopupMenuItem(
+                            content="Play Next",
+                            icon=ft.Icons.PLAY_ARROW,
+                            on_click=lambda e, track=t: self.on_play_next(track),
                         )
                     )
+                menu_items.append(
+                    ft.PopupMenuItem(
+                        content="Remove from Playlist",
+                        icon=ft.Icons.DELETE_OUTLINE,
+                        on_click=lambda e, track=t, playlist_id=self.selected_playlist.id: self._remove_track_from_playlist(
+                            playlist_id, track.id
+                        ),
+                    )
+                )
+                song_controls.append(
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT,
+                        tooltip="Song options",
+                        items=menu_items,
+                    )
+                )
                 row = ft.Container(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                     border_radius=4,

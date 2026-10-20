@@ -58,6 +58,7 @@ class PodcastsView(ft.Container):
         self._episode_render_id: int = 0
         self._episode_render_offset: int = 0
         self._episode_render_episodes: List[Episode] = []
+        self._episode_sort_order = "date_desc"
         self._episode_batch_loading = False
         self._search_error: Optional[str] = None
         self._feed_refresh_error: Optional[str] = None
@@ -590,6 +591,22 @@ class PodcastsView(ft.Container):
             disabled=self._feed_refreshing,
             on_click=lambda e, s=show: self._open_show_details(s, force_refresh=True),
         )
+        episode_sort = ft.Dropdown(
+            value=self._episode_sort_order,
+            options=[
+                ft.dropdown.Option("date_desc", "Newest first"),
+                ft.dropdown.Option("date_asc", "Oldest first"),
+            ],
+            width=145,
+            height=36,
+            content_padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            text_size=12,
+            border_color=self._mt.border_color,
+            focused_border_color=self._mt.current_accent,
+            on_select=lambda e, selected_show=show: self._on_episode_sort_change(
+                e, selected_show
+            ),
+        )
 
         header = ft.Row(
             spacing=16,
@@ -605,7 +622,7 @@ class PodcastsView(ft.Container):
                         ft.Text(f"{len(show.episodes)} episodes available", size=12, color=ft.Colors.GREY_400),
                         ft.Row(
                             spacing=4,
-                            controls=[sub_btn, refresh_btn],
+                            controls=[sub_btn, refresh_btn, episode_sort],
                         ),
                         ft.Text(
                             self._feed_refresh_status or self._feed_refresh_error or "",
@@ -650,14 +667,17 @@ class PodcastsView(ft.Container):
         if show_description_card is not None:
             episodes_list.controls.append(show_description_card)
         episodes_list.controls.append(ft.Divider(height=1))
-        ordered_episodes = sorted(
-            show.episodes,
-            key=lambda episode: (
-                episode.published_at is not None,
-                episode.published_at if episode.published_at is not None else 0,
-            ),
-            reverse=True,
+        dated_episodes = [
+            episode for episode in show.episodes if episode.published_at is not None
+        ]
+        undated_episodes = [
+            episode for episode in show.episodes if episode.published_at is None
+        ]
+        dated_episodes.sort(
+            key=lambda episode: episode.published_at or 0,
+            reverse=self._episode_sort_order == "date_desc",
         )
+        ordered_episodes = [*dated_episodes, *undated_episodes]
         initial_episodes = ordered_episodes[:INITIAL_EPISODE_BATCH_SIZE]
         episodes_list.controls.extend(
             self._build_episode_row(episode, show)
@@ -673,6 +693,16 @@ class PodcastsView(ft.Container):
 
         self.content_area.controls = [episodes_list]
         safe_update(self)
+
+    def _on_episode_sort_change(self, event, show: PodcastShow) -> None:
+        selected_order = getattr(event, "control", None)
+        value = getattr(selected_order, "value", None)
+        if value not in ("date_desc", "date_asc"):
+            return
+        if value == self._episode_sort_order:
+            return
+        self._episode_sort_order = value
+        self._render_show_episodes(show)
 
     def _build_episode_row(self, episode: Episode, show: PodcastShow) -> ft.Container:
         description = self._clean_html_text(episode.description)
