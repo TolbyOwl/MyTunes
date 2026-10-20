@@ -25,6 +25,12 @@ class PivotNav(ft.Container):
         self.header_buttons: List[ft.Control] = []
         self.header_texts: List[ft.Text] = []
         self.header_indicators: List[ft.Container] = []
+        self.fullscreen_button = ft.IconButton(
+            icon=ft.Icons.FULLSCREEN,
+            tooltip="Toggle fullscreen",
+            icon_color=self._mt.text_secondary,
+            on_click=lambda e: None,
+        )
 
         self._build_nav()
 
@@ -43,9 +49,17 @@ class PivotNav(ft.Container):
 
         self.content = ft.Row(
             spacing=32,
-            alignment=ft.MainAxisAlignment.START,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=self.header_buttons
+            controls=[
+                ft.Row(
+                    spacing=32,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=self.header_buttons,
+                ),
+                self.fullscreen_button,
+            ],
         )
 
     def _create_pivot_item(self, title: str, index: int, is_active: bool) -> ft.Container:

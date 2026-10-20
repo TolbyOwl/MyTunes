@@ -1,6 +1,8 @@
 from __future__ import annotations
 import os
 import sys
+import ctypes
+import time
 import flet as ft
 
 # Ensure project root is in sys.path
@@ -33,6 +35,270 @@ from mytunes.ui.views.playlists_view import PlaylistsView
 from mytunes.ui.views.settings_view import SettingsView
 
 from mytunes.ui.dialog_utils import show_snackbar, open_dialog, close_dialog
+
+
+class XInputController:
+    """Minimal XInput driver for the app's controller flow.
+
+    This listens for a connected Xbox-style controller and translates the
+    expected actions into app callbacks while keeping mouse interaction as the
+    fallback input mode.
+    """
+
+    # XInput bitmask constants
+    DPAD_UP = 0x0001
+    DPAD_DOWN = 0x0002
+    DPAD_LEFT = 0x0004
+    DPAD_RIGHT = 0x0008
+    START = 0x0010
+    BACK = 0x0020
+    LEFT_THUMB = 0x0040
+    RIGHT_THUMB = 0x0080
+    LEFT_SHOULDER = 0x0100
+    RIGHT_SHOULDER = 0x0200
+    A = 0x1000
+    B = 0x2000
+    X = 0x4000
+    Y = 0x8000
+
+    def __init__(
+        self,
+        page: ft.Page,
+        pivot_nav,
+        player_bar,
+        audio_engine,
+        queue_manager,
+        on_toggle_fullscreen,
+        views,
+        on_section_change,
+        toggle_lyrics,
+        open_queue_modal,
+    ):
+        self.page = page
+        self.pivot_nav = pivot_nav
+        self.player_bar = player_bar
+        self.audio_engine = audio_engine
+        self.queue_manager = queue_manager
+        self.on_toggle_fullscreen = on_toggle_fullscreen
+        self.views = views
+        self.on_section_change = on_section_change
+        self.toggle_lyrics = toggle_lyrics
+        self.open_queue_modal = open_queue_modal
+
+        self.connected = False
+        self.controller_mode = False
+        self._pressed_buttons = 0
+        self._stick_dead_zone = 0.35
+        self._last_mouse_move = 0.0
+        self._xinput = self._load_xinput()
+
+        self.page.on_mouse_move = lambda e: self._exit_controller_mode()
+        self.page.on_scroll = lambda e: self._exit_controller_mode()
+        self.page.run_task(self._poll_loop)
+
+    def _load_xinput(self):
+        try:
+            return ctypes.windll.xinput1_4
+        except Exception:
+            try:
+                return ctypes.windll.xinput9_1_0
+            except Exception:
+                return None
+
+    def _set_connected(self, connected: bool) -> None:
+        if self.connected == connected:
+            return
+        self.connected = connected
+        self.controller_mode = connected
+        self.player_bar.set_controller_mode(connected)
+        self.player_bar.set_controller_hints(
+            {
+                "A": "Play",
+                "B": "Back",
+                "X": "More",
+                "Y": "Search",
+                "LB/RB": "Tabs",
+                "DPad": "Volume",
+                "LT/RT": "Seek",
+                "Start": "Queue",
+            }
+            if connected
+            else {}
+        )
+        self.page.update()
+
+    def _exit_controller_mode(self) -> None:
+        if self.controller_mode:
+            self.controller_mode = False
+            self.player_bar.set_controller_mode(False)
+            self.page.update()
+
+    async def _poll_loop(self):
+        while True:
+            if self._xinput is None:
+                if self.connected:
+                    self._set_connected(False)
+                await __import__("asyncio").sleep(0.1)
+                continue
+
+            class XINPUT_GAMEPAD(ctypes.Structure):
+                _fields_ = [
+                    ("wButtons", ctypes.c_ushort),
+                    ("bLeftTrigger", ctypes.c_ubyte),
+                    ("bRightTrigger", ctypes.c_ubyte),
+                    ("sThumbLX", ctypes.c_short),
+                    ("sThumbLY", ctypes.c_short),
+                    ("sThumbRX", ctypes.c_short),
+                    ("sThumbRY", ctypes.c_short),
+                ]
+
+            class XINPUT_STATE(ctypes.Structure):
+                _fields_ = [
+                    ("dwPacketNumber", ctypes.c_ulong),
+                    ("Gamepad", XINPUT_GAMEPAD),
+                ]
+
+            state = XINPUT_STATE()
+            try:
+                result = self._xinput.XInputGetState(0, ctypes.byref(state))
+            except Exception:
+                if self.connected:
+                    self._set_connected(False)
+                await __import__("asyncio").sleep(0.1)
+                continue
+
+            if result != 0:
+                if self.connected:
+                    self._set_connected(False)
+                await __import__("asyncio").sleep(0.1)
+                continue
+
+            if not self.connected:
+                self._set_connected(True)
+
+            buttons = state.Gamepad.wButtons
+            left_x = state.Gamepad.sThumbLX / 32767.0
+            left_y = state.Gamepad.sThumbLY / 32767.0
+            right_x = state.Gamepad.sThumbRX / 32767.0
+            right_y = state.Gamepad.sThumbRY / 32767.0
+
+            self._handle_button_state(buttons)
+            self._handle_analog(left_x, left_y, right_x, right_y)
+            self._handle_triggers(state.Gamepad.bLeftTrigger, state.Gamepad.bRightTrigger)
+            await __import__("asyncio").sleep(0.05)
+
+    def _handle_button_state(self, buttons: int) -> None:
+        diff = buttons & ~self._pressed_buttons
+        self._pressed_buttons = buttons
+        if diff == 0:
+            return
+
+        if diff & self.A:
+            self.audio_engine.toggle_play_pause()
+        if diff & self.B:
+            self._handle_back()
+        if diff & self.X:
+            self.open_queue_modal()
+        if diff & self.Y:
+            self._handle_search()
+        if diff & self.LEFT_SHOULDER:
+            self._handle_prev_tab()
+        if diff & self.RIGHT_SHOULDER:
+            self._handle_next_tab()
+        if diff & self.START:
+            self.open_queue_modal()
+        if diff & self.BACK:
+            self.on_toggle_fullscreen()
+        if diff & self.DPAD_UP:
+            self._adjust_volume(+0.05)
+        if diff & self.DPAD_DOWN:
+            self._adjust_volume(-0.05)
+        if diff & self.DPAD_LEFT:
+            self.queue_manager.prev_track()
+        if diff & self.DPAD_RIGHT:
+            self.queue_manager.next_track()
+
+    def _handle_analog(self, left_x: float, left_y: float, right_x: float, right_y: float) -> None:
+        if abs(left_y) > self._stick_dead_zone:
+            if left_y < 0:
+                self._move_list_selection(-1)
+            else:
+                self._move_list_selection(1)
+
+        if abs(right_y) > self._stick_dead_zone:
+            if right_y < 0:
+                self._move_queue_order(-1)
+            else:
+                self._move_queue_order(1)
+
+        if abs(left_x) > self._stick_dead_zone:
+            if left_x < 0:
+                self.queue_manager.prev_track()
+            else:
+                self.queue_manager.next_track()
+
+        if abs(right_x) > self._stick_dead_zone and abs(right_x) > abs(right_y):
+            self._adjust_volume(right_x * 0.10)
+
+    def _handle_triggers(self, left_trigger: int, right_trigger: int) -> None:
+        if left_trigger > 10:
+            self.audio_engine.seek(max(0.0, self.audio_engine.current_position - 10.0))
+        if right_trigger > 10:
+            self.audio_engine.seek(self.audio_engine.current_position + 10.0)
+
+    def _handle_back(self) -> None:
+        if self.toggle_lyrics is not None:
+            self.toggle_lyrics()
+        elif self.pivot_nav.active_index > 0:
+            self.on_section_change(max(0, self.pivot_nav.active_index - 1))
+
+    def _handle_search(self) -> None:
+        current_index = self.pivot_nav.active_index
+        views = {
+            1: getattr(self.views[1], "search_input", None),
+            2: getattr(self.views[2], "search_input", None),
+        }
+        if current_index in views and views[current_index] is not None:
+            views[current_index].focus()
+
+    def _handle_prev_tab(self) -> None:
+        if self.pivot_nav.active_index > 0:
+            self.on_section_change(self.pivot_nav.active_index - 1)
+
+    def _handle_next_tab(self) -> None:
+        if self.pivot_nav.active_index < len(self.views) - 1:
+            self.on_section_change(self.pivot_nav.active_index + 1)
+
+    def _adjust_volume(self, delta: float) -> None:
+        self.audio_engine.set_volume(max(0.0, min(1.0, self.audio_engine.volume + delta)))
+
+    def _move_list_selection(self, direction: int) -> None:
+        if self.pivot_nav.active_index == 0:
+            return
+        view = self.views[self.pivot_nav.active_index]
+        elem = getattr(view, "content_area", None)
+        list_view = getattr(elem, "controls", None)
+        if not list_view:
+            return
+        if len(list_view) > 1:
+            next_index = min(max(0, len(list_view) - 1), 1)
+            target = list_view[next_index]
+            if hasattr(target, "focus"):
+                target.focus()
+
+    def _move_queue_order(self, direction: int) -> None:
+        if self.queue_manager.current_track is None:
+            return
+        current_index = self.queue_manager.current_index
+        if current_index < 0:
+            return
+        if direction < 0:
+            target_index = current_index - 1
+        else:
+            target_index = current_index + 1
+        if 0 <= target_index < len(self.queue_manager.queue):
+            self.queue_manager.reorder_at(current_index, target_index)
+
 
 def main(page: ft.Page) -> None:
     page.title = "MyTunes"
@@ -390,6 +656,19 @@ def main(page: ft.Page) -> None:
         player_bar._build_layout()
         page.update()
 
+    def toggle_fullscreen() -> None:
+        try:
+            window = page.window
+            if window is None:
+                return
+            if hasattr(window, "fullscreen"):
+                window.fullscreen = not bool(getattr(window, "fullscreen", False))
+            if hasattr(window, "borderless"):
+                window.borderless = bool(getattr(window, "fullscreen", False))
+        except Exception:
+            pass
+        page.update()
+
     # 6. Instantiate Views
     view_music = MusicView(page, local_provider, theme, play_track, play_next, add_to_queue)
     cloud_settings = CloudView(page, theme, sync_manager, embedded=True)
@@ -447,6 +726,7 @@ def main(page: ft.Page) -> None:
         theme=theme,
         on_section_change=on_section_change
     )
+    pivot_nav.fullscreen_button.on_click = lambda e: toggle_fullscreen()
 
     def open_artist_in_music(artist_name: str) -> None:
         pivot_nav.set_active_index(1)
@@ -488,6 +768,19 @@ def main(page: ft.Page) -> None:
             if saved_session.volume < 0.5
             else ft.Icons.VOLUME_UP
         )
+
+    controller_manager = XInputController(
+        page,
+        pivot_nav,
+        player_bar,
+        audio_engine,
+        queue_manager,
+        toggle_fullscreen,
+        views,
+        on_section_change,
+        toggle_lyrics,
+        open_queue_modal,
+    )
 
     # 9. Main Layout
     page.add(

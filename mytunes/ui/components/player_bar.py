@@ -245,6 +245,29 @@ class PlayerBar(ft.Container):
             on_change=self._on_volume_change
         )
 
+        self.controller_hints = ft.Row(
+            spacing=6,
+            wrap=True,
+            alignment=ft.MainAxisAlignment.END,
+            controls=[],
+        )
+        self.controller_overlay = ft.Container(
+            visible=False,
+            padding=ft.Padding.only(bottom=4),
+            content=self.controller_hints,
+        )
+
+        self._controller_visible_state = {
+            "lyrics": True,
+            "speed": True,
+            "eq": True,
+            "sleep": True,
+            "queue": True,
+            "volume": True,
+            "volume_slider": True,
+            "fav": True,
+        }
+
         # Quick tools
         self.btn_sleep = ft.IconButton(
             icon=ft.Icons.BEDTIME,
@@ -365,11 +388,64 @@ class PlayerBar(ft.Container):
             ]
         )
 
-        self.content = ft.Row(
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[left_section, center_section, right_section]
+        self.content = ft.Column(
+            spacing=4,
+            controls=[
+                self.controller_overlay,
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[left_section, center_section, right_section],
+                ),
+            ],
         )
+
+    def set_controller_mode(self, enabled: bool) -> None:
+        self.controller_overlay.visible = enabled
+        self.controller_hints.visible = enabled
+        if enabled:
+            self._controller_visible_state = {
+                "lyrics": self.btn_lyrics.visible,
+                "speed": self.btn_speed.visible,
+                "eq": self.btn_eq.visible,
+                "sleep": self.btn_sleep.visible,
+                "queue": self.btn_queue.visible,
+                "volume": self.btn_volume.visible,
+                "volume_slider": self.volume_slider.visible,
+                "fav": self.fav_button.visible,
+            }
+            self.btn_lyrics.visible = False
+            self.btn_speed.visible = False
+            self.btn_eq.visible = False
+            self.btn_sleep.visible = False
+            self.btn_queue.visible = False
+            self.btn_volume.visible = False
+            self.volume_slider.visible = False
+            self.fav_button.visible = False
+        else:
+            self.btn_lyrics.visible = self._controller_visible_state.get("lyrics", True)
+            self.btn_speed.visible = self._controller_visible_state.get("speed", True)
+            self.btn_eq.visible = self._controller_visible_state.get("eq", True)
+            self.btn_sleep.visible = self._controller_visible_state.get("sleep", True)
+            self.btn_queue.visible = self._controller_visible_state.get("queue", True)
+            self.btn_volume.visible = self._controller_visible_state.get("volume", True)
+            self.volume_slider.visible = self._controller_visible_state.get("volume_slider", True)
+            self.fav_button.visible = self._controller_visible_state.get("fav", True)
+        safe_update(self)
+
+    def set_controller_hints(self, hints: dict[str, str]) -> None:
+        self.controller_hints.controls = [
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
+                content=ft.Text(f"{key}: {value}", size=10, color=self._mt.text_primary),
+            )
+            for key, value in hints.items()
+        ]
+        self.controller_hints.visible = bool(hints)
+        self.controller_overlay.visible = self.controller_overlay.visible or bool(hints)
+        safe_update(self)
 
     def _show_artwork(self, src: str) -> None:
         """Display a real artwork URL/path and hide the placeholder."""
