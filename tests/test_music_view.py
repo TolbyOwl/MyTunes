@@ -123,6 +123,18 @@ class TestMusicSongList(unittest.TestCase):
 
         run_task.assert_called_once_with(view._jump_to_song_group, "B")
 
+    def test_song_row_passes_its_precomputed_queue_index(self):
+        tracks = [
+            Track(id="a", title="Apple"),
+            Track(id="b", title="Beta"),
+        ]
+        view, play_track = self._create_view(tracks)
+        row = view._build_track_row(tracks[1], tracks, 1)
+
+        row.on_click(None)
+
+        play_track.assert_called_once_with(tracks[1], tracks, 1)
+
     def test_song_menu_adds_track_to_selected_playlist(self):
         connection = init_db(":memory:")
         connection.execute(
@@ -216,6 +228,94 @@ class TestMusicSongList(unittest.TestCase):
         self.assertFalse(view._song_group_keys)
         self.assertEqual(view.song_index_buttons, {})
         self.assertIsInstance(view.songs_list, ft.ListView)
+        self.assertTrue(view.songs_list.build_controls_on_demand)
+
+    def test_song_view_reuses_cached_controls_when_rendered_again(self):
+        view, _ = self._create_view([
+            Track(id="a", title="Apple"),
+            Track(id="b", title="Beta"),
+        ])
+        cached_content = view.content_area.content
+        cached_list = view.songs_list
+        view.content_area.content = ft.Text("Another tab")
+
+        view._render_songs_tab(view.displayed_tracks)
+
+        self.assertIs(view.content_area.content, cached_content)
+        self.assertIs(view.songs_list, cached_list)
+
+    def test_favorite_actions_invalidate_song_render_cache(self):
+        view, _ = self._create_view([])
+        track = Track(id="favorite", title="Favorite")
+
+        for action, argument in (
+            (view._toggle_fav, track),
+            (view._favorite_album, [track]),
+            (view._unfavorite_album, [track]),
+        ):
+            view._songs_render_cache_key = ("cached",)
+            with (
+                patch.object(view, "_filter_and_render"),
+                patch("mytunes.ui.views.music_view.show_snackbar"),
+            ):
+                action(argument)
+            self.assertIsNone(view._songs_render_cache_key)
+
+    def test_song_row_uses_one_artwork_control_and_keeps_placeholder(self):
+        view, _ = self._create_view([])
+        missing_art_row = view._build_track_row(
+            Track(id="missing", title="Missing artwork")
+        )
+        artwork = missing_art_row.content.controls[0]
+        self.assertIsInstance(artwork, ft.Container)
+
+        image_row = view._build_track_row(
+            Track(id="with-art", title="Artwork", artwork_path="cover.png")
+        )
+        artwork = image_row.content.controls[0]
+        self.assertIsInstance(artwork, ft.Image)
+        self.assertIsInstance(artwork.error_content, ft.Container)
+
+    def test_search_change_waits_for_debounce_before_filtering(self):
+        view, _ = self._create_view([
+            Track(id="a", title="Apple"),
+            Track(id="b", title="Beta"),
+        ])
+        view.search_input.value = "beta"
+
+        with patch(
+            "mytunes.ui.views.music_view.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            asyncio.run(view._on_search_change(None))
+
+        sleep.assert_awaited_once_with(0.3)
+        self.assertEqual([track.id for track in view.displayed_tracks], ["b"])
+
+    def test_only_latest_search_change_renders(self):
+        view, _ = self._create_view([Track(id="a", title="Apple")])
+        render = Mock()
+        view._filter_and_render = render
+
+        async def send_search_changes():
+            await asyncio.gather(
+                view._on_search_change(None),
+                view._on_search_change(None),
+            )
+
+        real_sleep = asyncio.sleep
+
+        async def yield_during_debounce(_delay):
+            await real_sleep(0)
+
+        with patch(
+            "mytunes.ui.views.music_view.asyncio.sleep",
+            new_callable=AsyncMock,
+            side_effect=yield_during_debounce,
+        ):
+            asyncio.run(send_search_changes())
+
+        render.assert_called_once_with()
 
     def test_missing_album_art_has_visible_album_placeholder(self):
         view, _ = self._create_view([])
@@ -410,9 +510,10 @@ class TestMusicSongList(unittest.TestCase):
         with patch("mytunes.ui.views.music_view.random.shuffle", side_effect=lambda items: items.reverse()):
             view._play_songs_random(tracks)
 
-        played_track, queued_tracks = play_track.call_args.args
+        played_track, queued_tracks, start_index = play_track.call_args.args
         self.assertEqual(played_track.id, "c")
         self.assertEqual([track.id for track in queued_tracks], ["c", "b", "a"])
+        self.assertEqual(start_index, 0)
         self.assertEqual([track.id for track in tracks], ["a", "b", "c"])
 
 

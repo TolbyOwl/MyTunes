@@ -114,20 +114,26 @@ class WindowsMediaControls:
 
     async def _update_artwork(self, generation: int, track: Track) -> None:
         artwork_path = await self.artwork_cache.resolve(track)
-        if generation != self._track_generation or self._display_updater is None:
+        updater = self._display_updater
+        if generation != self._track_generation or updater is None:
             return
 
         try:
             if artwork_path is None:
-                self._display_updater.thumbnail = None
+                updater.thumbnail = None
             else:
                 storage_file = await self._storage_file.get_file_from_path_async(
                     str(artwork_path)
                 )
-                self._display_updater.thumbnail = (
+                if (
+                    generation != self._track_generation
+                    or updater is not self._display_updater
+                ):
+                    return
+                updater.thumbnail = (
                     self._stream_reference.create_from_file(storage_file)
                 )
-            self._display_updater.update()
+            updater.update()
         except Exception:
             logger.exception("Failed to publish Windows media artwork.")
 
@@ -187,6 +193,7 @@ class WindowsMediaControls:
             self.actions.dispatch("previous")
 
     def close(self) -> None:
+        self._track_generation += 1
         if self._controls is not None and self._button_pressed_token is not None:
             try:
                 self._controls.remove_button_pressed(self._button_pressed_token)

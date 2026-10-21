@@ -34,8 +34,14 @@ class QueueManager:
             return self.queue[self.current_index]
         return None
 
-    def set_queue(self, tracks: List[Track], start_index: int = 0) -> Optional[Track]:
-        """Sets a new queue of tracks and immediately selects start_index."""
+    def set_queue(
+        self,
+        tracks: List[Track],
+        start_index: int = 0,
+        *,
+        notify: bool = True,
+    ) -> Optional[Track]:
+        """Sets a new queue and optionally notifies listeners immediately."""
         self.queue = list(tracks)
         self.original_queue = list(tracks)
         self.history.clear()
@@ -44,11 +50,16 @@ class QueueManager:
         else:
             self.current_index = 0 if self.queue else -1
 
+        if notify:
+            self.notify_queue_state_changed()
         current = self.current_track
-        if self.on_track_changed:
-            self.on_track_changed(current)
-        self._notify_queue_changed()
         return current
+
+    def notify_queue_state_changed(self) -> None:
+        """Notify listeners after a queue and its current track have changed."""
+        if self.on_track_changed:
+            self.on_track_changed(self.current_track)
+        self._notify_queue_changed()
 
     def play_next(self, track: Track) -> None:
         """Inserts a track immediately after the currently playing song."""

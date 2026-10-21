@@ -1151,7 +1151,12 @@ def main(page: ft.Page) -> None:
         else:
             player_bar.update_position(current, total)
         media_controls.update_position(current, total)
-        persist_playback_session()
+        playback_session.save_position(
+            queue_manager,
+            current,
+            audio_engine.volume,
+            audio_engine.is_muted,
+        )
         if lyrics_active:
             lyrics_view.update_position(current)
 
@@ -1187,13 +1192,27 @@ def main(page: ft.Page) -> None:
     )
 
     # Playback handlers
-    def play_track(track: Track, current_list: list[Track]) -> None:
-        try:
-            idx = current_list.index(track)
-        except ValueError:
-            idx = 0
-        queue_manager.set_queue(current_list, start_index=idx)
+    def play_track(
+        track: Track,
+        current_list: list[Track],
+        start_index: int | None = None,
+    ) -> None:
+        if (
+            start_index is None
+            or not 0 <= start_index < len(current_list)
+            or current_list[start_index] is not track
+        ):
+            try:
+                start_index = current_list.index(track)
+            except ValueError:
+                start_index = 0
+        queue_manager.set_queue(
+            current_list,
+            start_index=start_index,
+            notify=False,
+        )
         audio_engine.play_track(track)
+        queue_manager.notify_queue_state_changed()
 
     def play_next(track: Track) -> None:
         queue_manager.play_next(track)

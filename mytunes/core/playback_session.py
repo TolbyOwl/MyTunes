@@ -137,6 +137,51 @@ class PlaybackSessionStore:
             "volume": max(0.0, min(1.0, volume)),
             "is_muted": is_muted,
         }
+        self._write_payload(payload, current_track_id)
+
+    def save_position(
+        self,
+        queue: QueueManager,
+        position_seconds: float,
+        volume: float,
+        is_muted: bool,
+    ) -> None:
+        """Persist a throttled position update without rebuilding the saved queue."""
+        current_track = queue.current_track
+        current_track_id = current_track.id if current_track else None
+        if (
+            self._last_saved_payload is None
+            or current_track_id != self._last_current_track_id
+        ):
+            self.save(queue, position_seconds, volume, is_muted)
+            return
+
+        position = (
+            max(0.0, position_seconds)
+            if math.isfinite(position_seconds)
+            else 0.0
+        )
+        now = time.monotonic()
+        if (
+            now - self._last_position_saved_at < _POSITION_SAVE_INTERVAL_SECONDS
+            and abs(position - self._last_saved_position)
+            < _POSITION_SAVE_INTERVAL_SECONDS
+        ):
+            return
+
+        self._last_saved_position = position
+        self._last_position_saved_at = now
+        payload = dict(self._last_saved_payload)
+        payload["position_seconds"] = position
+        payload["volume"] = max(0.0, min(1.0, volume))
+        payload["is_muted"] = is_muted
+        self._write_payload(payload, current_track_id)
+
+    def _write_payload(
+        self,
+        payload: dict[str, object],
+        current_track_id: str | None,
+    ) -> None:
         if payload == self._last_saved_payload:
             return
         self.connection.execute(

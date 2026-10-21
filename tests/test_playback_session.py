@@ -80,6 +80,35 @@ class TestPlaybackSessionStore(unittest.TestCase):
         self.assertEqual(restored.current_index, 2)
         self.assertEqual(restored.position_seconds, 15)
 
+    def test_position_only_save_does_not_rebuild_queue_between_intervals(self):
+        self.store.save(
+            self.queue,
+            position_seconds=0,
+            volume=0.8,
+            is_muted=False,
+            force_position=True,
+        )
+
+        class NonIterableQueue(list):
+            def __iter__(self):
+                raise AssertionError("Position persistence iterated the full queue")
+
+        self.queue.queue = NonIterableQueue(self.queue.queue)
+
+        with patch("mytunes.core.playback_session.time.monotonic", return_value=12):
+            self.store.save_position(self.queue, 2, 0.8, False)
+        saved_value = self.connection.execute(
+            "SELECT value FROM settings WHERE key = 'playback_session'"
+        ).fetchone()["value"]
+        self.assertEqual(json.loads(saved_value)["position_seconds"], 0)
+
+        with patch("mytunes.core.playback_session.time.monotonic", return_value=15):
+            self.store.save_position(self.queue, 5, 0.8, False)
+        saved_value = self.connection.execute(
+            "SELECT value FROM settings WHERE key = 'playback_session'"
+        ).fetchone()["value"]
+        self.assertEqual(json.loads(saved_value)["position_seconds"], 5)
+
     def test_restore_seek_waits_for_media_duration_and_clamps_position(self):
         engine = AudioEngine.__new__(AudioEngine)
         engine.audio = Mock()

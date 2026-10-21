@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from mytunes.ui.dialog_utils import (
     close_dialog,
     open_dialog,
@@ -37,7 +38,7 @@ class MusicView(ft.Container):
         page: ft.Page,
         local_provider: LocalProvider,
         theme: MetroTheme,
-        on_play_track: Callable[[Track, List[Track]], None],
+        on_play_track: Callable[[Track, List[Track], Optional[int]], None],
         on_play_next: Callable[[Track], None],
         on_add_queue: Callable[[Track], None],
     ):
@@ -51,6 +52,11 @@ class MusicView(ft.Container):
 
         self.all_tracks: List[Track] = []
         self.displayed_tracks: List[Track] = []
+        self._song_window_size = 200
+        self._song_window_start = 0
+        self._search_generation = 0
+        self._songs_render_cache_key: Optional[tuple] = None
+        self._songs_render_cache_content: Optional[ft.Control] = None
         self.current_subview = "songs"  # songs, albums, artists, favorites, album_detail, artist_detail
         self.current_sort = "alpha_asc"  # alpha_asc, alpha_desc, date_desc, date_asc
         self.selected_album_name: Optional[str] = None
@@ -166,6 +172,7 @@ class MusicView(ft.Container):
     def load_tracks(self) -> None:
         """Loads tracks from database and populates list."""
         self.all_tracks = self.provider.get_all_tracks()
+        self._songs_render_cache_key = None
         self._filter_and_render()
 
     def _filter_and_render(self) -> None:
@@ -178,15 +185,19 @@ class MusicView(ft.Container):
         if self.current_subview == "favorites":
             tracks = [t for t in tracks if t.is_favorite]
 
-        # Apply sorting to track list for songs / favorites subview
-        if self.current_sort == "alpha_desc":
-            tracks = sorted(tracks, key=lambda t: (t.title or "").lower(), reverse=True)
-        elif self.current_sort == "date_desc":
-            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0, reverse=True)
-        elif self.current_sort == "date_asc":
-            tracks = sorted(tracks, key=lambda t: t.date_added or 0.0) 
-        else:  # alpha_asc default
-            tracks = sorted(tracks, key=lambda t: (t.title or "").lower())
+        if self.current_subview in {"songs", "favorites"}:
+            if self.current_sort == "alpha_desc":
+                tracks = sorted(
+                    tracks, key=lambda t: (t.title or "").lower(), reverse=True
+                )
+            elif self.current_sort == "date_desc":
+                tracks = sorted(
+                    tracks, key=lambda t: t.date_added or 0.0, reverse=True
+                )
+            elif self.current_sort == "date_asc":
+                tracks = sorted(tracks, key=lambda t: t.date_added or 0.0)
+            else:  # alpha_asc default
+                tracks = sorted(tracks, key=lambda t: (t.title or "").lower())
 
         self.displayed_tracks = tracks
 
@@ -211,27 +222,34 @@ class MusicView(ft.Container):
             self._render_songs_tab(tracks)
 
     def _render_songs_tab(self, tracks: List[Track]) -> None:
-        """Renders standard songs/favorites list."""
+        """Render songs and favorites with on-demand list children."""
+        query = self.search_input.value.strip().lower() if self.search_input.value else ""
+        cache_key = (
+            query,
+            self.current_sort,
+            self.current_subview,
+            tuple(id(track) for track in tracks),
+        )
+        if (
+            cache_key == self._songs_render_cache_key
+            and self._songs_render_cache_content is not None
+        ):
+            self.content_area.content = self._songs_render_cache_content
+            safe_update(self)
+            return
+
+        self._song_window_start = 0
         alpha_sorted = self.current_sort in {"alpha_asc", "alpha_desc"}
         self._song_group_keys: Dict[str, ft.ScrollKey] = {}
         self.song_index_buttons: Dict[str, ft.Control] = {}
-        if alpha_sorted:
+
+        if not tracks:
             songs_list = ft.ListView(
                 expand=True,
                 spacing=4,
                 scroll=ft.ScrollMode.AUTO,
                 build_controls_on_demand=True,
             )
-        else:
-            songs_list = ft.ListView(
-                expand=True,
-                spacing=4,
-                divider_thickness=0.5,
-                scroll=ft.ScrollMode.AUTO,
-            )
-        self.songs_list = songs_list
-
-        if not tracks:
             songs_list.controls.append(
                 ft.Container(
                     alignment=ft.Alignment.CENTER,
@@ -247,66 +265,89 @@ class MusicView(ft.Container):
                     )
                 )
             )
-        else:
-            songs_list.controls.append(
-                ft.Container(
-                    padding=ft.Padding.only(bottom=8),
-                    content=ft.OutlinedButton(
-                        "Play all on shuffle",
-                        icon=ft.Icons.SHUFFLE,
-                        on_click=lambda e, song_tracks=list(tracks): self._play_songs_random(song_tracks),
-                    ),
-                )
-            )
-
-            if alpha_sorted:
-                grouped_tracks: Dict[str, List[Track]] = {}
-                for track in tracks:
-                    group = self._track_index_group(track)
-                    grouped_tracks.setdefault(group, []).append(track)
-
-                letter_order = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-                if self.current_sort == "alpha_desc":
-                    letter_order.reverse()
-                group_order = ["#", *letter_order, "~"]
-                self._song_group_keys = {
-                    group: ft.ScrollKey(f"songs-index-{group}")
-                    for group in grouped_tracks
-                }
-                for group in group_order:
-                    group_tracks = grouped_tracks.get(group)
-                    if not group_tracks:
-                        continue
-                    songs_list.controls.append(
-                        ft.Container(
-                            key=self._song_group_keys[group],
-                            padding=ft.Padding.only(top=12, bottom=4),
-                            content=ft.Text(
-                                group,
-                                size=18,
-                                weight=ft.FontWeight.W_800,
-                                color=self._mt.current_accent,
-                            ),
-                        )
-                    )
-                    songs_list.controls.extend(
-                        self._build_track_row(track) for track in group_tracks
-                    )
-                self.content_area.content = ft.Row(
-                    expand=True,
-                    spacing=8,
-                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                    controls=[
-                        ft.Container(content=songs_list, expand=1),
-                        self._build_song_letter_rail(group_order),
-                    ],
-                )
-            else:
-                self._song_group_keys = {}
-                songs_list.controls.extend(self._build_track_row(track) for track in tracks)
-
-        if not tracks or not alpha_sorted:
+            self.songs_list = songs_list
             self.content_area.content = songs_list
+            self._songs_render_cache_key = cache_key
+            self._songs_render_cache_content = songs_list
+            safe_update(self)
+            return
+
+        songs_list = ft.ListView(
+            expand=True,
+            spacing=4,
+            scroll=ft.ScrollMode.AUTO,
+            on_scroll=lambda e: self._on_song_list_scroll(e),
+            build_controls_on_demand=True,
+        )
+        self.songs_list = songs_list
+
+        songs_list.controls.append(
+            ft.Container(
+                padding=ft.Padding.only(bottom=8),
+                content=ft.OutlinedButton(
+                    "Play all on shuffle",
+                    icon=ft.Icons.SHUFFLE,
+                    on_click=lambda e, song_tracks=list(tracks): self._play_songs_random(song_tracks),
+                ),
+            )
+        )
+
+        if alpha_sorted:
+            grouped_tracks: Dict[str, List[tuple[int, Track]]] = {}
+            for index, track in enumerate(tracks):
+                group = self._track_index_group(track)
+                grouped_tracks.setdefault(group, []).append((index, track))
+
+            letter_order = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            if self.current_sort == "alpha_desc":
+                letter_order.reverse()
+            group_order = ["#", *letter_order, "~"]
+            self._song_group_keys = {
+                group: ft.ScrollKey(f"songs-index-{group}")
+                for group in grouped_tracks
+            }
+            visible_rows = []
+            for group in group_order:
+                group_tracks = grouped_tracks.get(group)
+                if not group_tracks:
+                    continue
+                visible_rows.append(
+                    ft.Container(
+                        key=self._song_group_keys[group],
+                        padding=ft.Padding.only(top=12, bottom=4),
+                        content=ft.Text(
+                            group,
+                            size=18,
+                            weight=ft.FontWeight.W_800,
+                            color=self._mt.current_accent,
+                        ),
+                    )
+                )
+                visible_rows.extend(
+                    self._build_track_row(track, tracks, index)
+                    for index, track in group_tracks
+                )
+
+            songs_list.controls.extend(visible_rows)
+            self.content_area.content = ft.Row(
+                expand=True,
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    ft.Container(content=songs_list, expand=1),
+                    self._build_song_letter_rail(group_order),
+                ],
+            )
+        else:
+            self._song_group_keys = {}
+            songs_list.controls.extend(
+                self._build_track_row(track, tracks, index)
+                for index, track in enumerate(tracks[: self._song_window_size])
+            )
+            self.content_area.content = songs_list
+
+        self._songs_render_cache_key = cache_key
+        self._songs_render_cache_content = self.content_area.content
         safe_update(self)
 
     def _build_song_letter_rail(self, group_order: List[str]) -> ft.Control:
@@ -351,7 +392,7 @@ class MusicView(ft.Container):
         shuffled = list(tracks)
         random.shuffle(shuffled)
         if shuffled:
-            self.on_play_track(shuffled[0], shuffled)
+            self.on_play_track(shuffled[0], shuffled, 0)
             show_snackbar(self.app_page, f"Playing {len(shuffled)} songs on shuffle")
 
     def _on_song_letter_click(self, group: str) -> None:
@@ -372,6 +413,50 @@ class MusicView(ft.Container):
             duration=280,
             curve=ft.AnimationCurve.EASE_OUT_CUBIC,
         )
+
+    def _on_song_list_scroll(self, event: ft.OnScrollEvent) -> None:
+        if self.current_sort in {"alpha_asc", "alpha_desc"}:
+            return
+        if not self.displayed_tracks or not self.songs_list:
+            return
+        max_scroll = getattr(self.songs_list, "max_scroll_extent", 0)
+        if max_scroll <= 0:
+            return
+        scroll_ratio = float(event.pixels) / max_scroll if max_scroll else 0.0
+        visible_count = max(1, self._song_window_size)
+        start_index = min(
+            len(self.displayed_tracks) - visible_count,
+            max(0, int(scroll_ratio * max(0, len(self.displayed_tracks) - visible_count))),
+        )
+        if start_index == self._song_window_start:
+            return
+
+        self._song_window_start = start_index
+        self._render_songs_window()
+
+    def _render_songs_window(self) -> None:
+        if self.current_sort in {"alpha_asc", "alpha_desc"} or not self.displayed_tracks:
+            return
+
+        end_index = min(len(self.displayed_tracks), self._song_window_start + self._song_window_size)
+        visible_tracks = self.displayed_tracks[self._song_window_start:end_index]
+        controls: List[ft.Control] = [
+            ft.Container(
+                padding=ft.Padding.only(bottom=8),
+                content=ft.OutlinedButton(
+                    "Play all on shuffle",
+                    icon=ft.Icons.SHUFFLE,
+                    on_click=lambda e, song_tracks=list(self.displayed_tracks): self._play_songs_random(song_tracks),
+                ),
+            )
+        ]
+        controls.extend(
+            self._build_track_row(track, self.displayed_tracks, self._song_window_start + index)
+            for index, track in enumerate(visible_tracks)
+        )
+
+        self.songs_list.controls = controls
+        safe_update(self)
 
     def _render_albums_tab(self, tracks: List[Track], query: str = "") -> None:
         """Renders Album tiles grid: square container (Metro style), album name, and smaller artist name below."""
@@ -994,7 +1079,9 @@ class MusicView(ft.Container):
                 padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                 border_radius=4,
                 ink=True,
-                on_click=lambda e, tr=t, trks=artist_tracks_sorted: self.on_play_track(tr, trks),
+                on_click=lambda e, tr=t, trks=artist_tracks_sorted, i=idx - 1: (
+                    self.on_play_track(tr, trks, i)
+                ),
                 content=ft.Row(
                     spacing=12,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1225,6 +1312,9 @@ class MusicView(ft.Container):
 
         tracklist_controls: List[ft.Control] = []
 
+        album_track_indices = {
+            track.id: index for index, track in enumerate(album_tracks_sorted)
+        }
         for d_num in discs_sorted:
             d_tracks = discs_map[d_num]
             if has_multiple_discs:
@@ -1278,7 +1368,9 @@ class MusicView(ft.Container):
                     border_radius=4,
                     ink=True,
                     # Tapping any song plays from that song with the entire album treated as a single list
-                    on_click=lambda e, tr=t, trks=album_tracks_sorted: self.on_play_track(tr, trks),
+                    on_click=lambda e, tr=t, trks=album_tracks_sorted, i=album_track_indices[t.id]: (
+                        self.on_play_track(tr, trks, i)
+                    ),
                     content=ft.Row(
                         spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1361,6 +1453,7 @@ class MusicView(ft.Container):
                 pass
         self.provider.conn.commit()
         show_snackbar(self.app_page, f"Added all {len(tracks)} songs to favourites!")
+        self._songs_render_cache_key = None
         self._filter_and_render()
 
     def _unfavorite_album(self, tracks: List[Track]) -> None:
@@ -1372,6 +1465,7 @@ class MusicView(ft.Container):
                 pass
         self.provider.conn.commit()
         show_snackbar(self.app_page, f"Removed all {len(tracks)} songs from favourites.")
+        self._songs_render_cache_key = None
         self._filter_and_render()
 
     def _play_next_album(self, tracks: List[Track]) -> None:
@@ -1388,16 +1482,38 @@ class MusicView(ft.Container):
         shuffled = list(tracks)
         random.shuffle(shuffled)
         if shuffled:
-            self.on_play_track(shuffled[0], shuffled)
+            self.on_play_track(shuffled[0], shuffled, 0)
             show_snackbar(self.app_page, f"Playing album on random ({len(shuffled)} songs)")
 
-    def _build_track_row(self, track: Track) -> ft.Container:
-        # Album art thumbnail
-        art_img, _ = self._build_artwork(
-            track.artwork_path,
-            size=40,
-            placeholder_icon=ft.Icons.MUSIC_NOTE,
-            icon_size=20,
+    def _build_track_row(
+        self,
+        track: Track,
+        tracks: Optional[List[Track]] = None,
+        start_index: Optional[int] = None,
+    ) -> ft.Container:
+        playback_tracks = tracks if tracks is not None else self.displayed_tracks
+
+        artwork_placeholder = ft.Container(
+            width=40,
+            height=40,
+            bgcolor=self._mt.surface_variant,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Icon(
+                ft.Icons.MUSIC_NOTE,
+                size=20,
+                color=ft.Colors.GREY_500,
+            ),
+        )
+        art_img: ft.Control = (
+            ft.Image(
+                src=track.artwork_path or "",
+                width=40,
+                height=40,
+                fit=ft.BoxFit.COVER,
+                error_content=artwork_placeholder,
+            )
+            if track.artwork_path
+            else artwork_placeholder
         )
 
         title_col = ft.Column(
@@ -1435,7 +1551,9 @@ class MusicView(ft.Container):
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             border_radius=4,
             ink=True,
-            on_click=lambda e, tr=track: self.on_play_track(tr, self.displayed_tracks),
+            on_click=lambda e, tr=track, trks=playback_tracks, i=start_index: (
+                self.on_play_track(tr, trks, i)
+            ),
             content=ft.Row(
                 spacing=12,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1580,7 +1698,13 @@ class MusicView(ft.Container):
         track.is_favorite = not track.is_favorite
         self.provider.conn.execute("UPDATE tracks SET is_favorite = ? WHERE id = ?", (1 if track.is_favorite else 0, track.id))
         self.provider.conn.commit()
+        self._songs_render_cache_key = None
         self._filter_and_render()
 
-    def _on_search_change(self, e) -> None:
+    async def _on_search_change(self, e) -> None:
+        self._search_generation += 1
+        generation = self._search_generation
+        await asyncio.sleep(0.3)
+        if generation != self._search_generation:
+            return
         self._filter_and_render()

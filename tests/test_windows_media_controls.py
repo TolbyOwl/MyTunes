@@ -127,6 +127,36 @@ class TestWindowsMediaControls(unittest.TestCase):
 
         media_controls._display_updater.update.assert_not_called()
 
+    def test_ignores_artwork_when_controls_close_during_file_resolution(self):
+        media_controls = object.__new__(WindowsMediaControls)
+        media_controls._track_generation = 1
+        updater = SimpleNamespace(update=Mock())
+        media_controls._display_updater = updater
+        media_controls._storage_file = Mock()
+        media_controls._stream_reference = Mock()
+        media_controls._controls = Mock()
+        media_controls._button_pressed_token = None
+        media_controls._player = Mock()
+        media_controls.artwork_cache = MediaArtworkCache()
+        track = Track(id="closing", title="Closing")
+
+        async def close_during_resolution(_path):
+            media_controls.close()
+            return "storage-file"
+
+        media_controls._storage_file.get_file_from_path_async = AsyncMock(
+            side_effect=close_during_resolution
+        )
+        with patch.object(
+            media_controls.artwork_cache,
+            "resolve",
+            new=AsyncMock(return_value=Path("C:/covers/cover.jpg")),
+        ):
+            asyncio.run(media_controls._update_artwork(1, track))
+
+        updater.update.assert_not_called()
+        self.assertFalse(hasattr(updater, "thumbnail"))
+
     def test_audio_stop_notifies_the_system_media_session(self):
         audio_engine = object.__new__(AudioEngine)
         audio_engine.audio = Mock()

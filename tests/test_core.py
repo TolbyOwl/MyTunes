@@ -82,6 +82,23 @@ class TestMyTunesCore(unittest.TestCase):
         self.assertIs(changes[-1], self.tracks[3])
         self.assertIsNone(qm.play_at(len(self.tracks)))
 
+    def test_queue_notifications_can_be_deferred_until_playback_starts(self):
+        track_changes = []
+        queue_changes = []
+        qm = QueueManager(on_track_changed=track_changes.append)
+        qm.on_queue_changed = lambda: queue_changes.append(list(qm.queue))
+
+        qm.set_queue(self.tracks, start_index=2, notify=False)
+
+        self.assertEqual(track_changes, [])
+        self.assertEqual(queue_changes, [])
+        self.assertIs(qm.current_track, self.tracks[2])
+
+        qm.notify_queue_state_changed()
+
+        self.assertEqual(track_changes, [self.tracks[2]])
+        self.assertEqual(queue_changes, [self.tracks])
+
     def test_queue_reorder_preserves_current_track_and_manual_order(self):
         qm = QueueManager()
         qm.set_queue(self.tracks, start_index=2)
