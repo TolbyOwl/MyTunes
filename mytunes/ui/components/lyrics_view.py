@@ -16,7 +16,6 @@ class LyricsView(ft.Container):
         self.lines: List[LyricsLine] = []
         self.plain_lyrics: str = ""
         self.active_index: int = -1
-        self.controller_selected_index: int = -1
         self.is_loading: bool = False
         self.auto_follow = True
         self.line_scroll_keys: List[ft.ScrollKey] = []
@@ -57,7 +56,6 @@ class LyricsView(ft.Container):
         self.lines.clear()
         self.plain_lyrics = ""
         self.active_index = -1
-        self.controller_selected_index = -1
         self.is_loading = True
         self.auto_follow = True
         self.resume_auto_scroll_button.visible = False
@@ -175,56 +173,3 @@ class LyricsView(ft.Container):
     def _seek_to_line(self, line: LyricsLine) -> None:
         self.on_seek(line.time_seconds)
         self.update_position(line.time_seconds)
-
-    def move_controller_selection(self, direction: int) -> None:
-        if not self.lines:
-            return
-        if self.auto_follow:
-            self.auto_follow = False
-            self.resume_auto_scroll_button.visible = True
-        previous_index = self.controller_selected_index
-        if self.controller_selected_index < 0:
-            self.controller_selected_index = min(
-                len(self.lines) - 1,
-                max(0, self.active_index),
-            )
-        else:
-            self.controller_selected_index = min(
-                len(self.lines) - 1,
-                max(0, self.controller_selected_index + direction),
-            )
-
-        if (
-            0 <= previous_index < len(self.lyrics_column.controls)
-            and previous_index != self.active_index
-        ):
-            previous = self.lyrics_column.controls[previous_index]
-            if isinstance(previous, ft.Text):
-                previous.size = 18
-                previous.weight = ft.FontWeight.W_400
-                previous.color = ft.Colors.GREY_500
-
-        if 0 <= self.controller_selected_index < len(self.lyrics_column.controls):
-            selected = self.lyrics_column.controls[self.controller_selected_index]
-            if isinstance(selected, ft.Text):
-                selected.size = 24
-                selected.weight = ft.FontWeight.BOLD
-                selected.color = ft.Colors.BLUE_400
-            if self.page is not None:
-                self.app_page.run_task(
-                    self._scroll_to_controller_selection,
-                    self.controller_selected_index,
-                )
-        safe_update(self)
-
-    def activate_controller_selection(self) -> None:
-        index = self.controller_selected_index
-        if 0 <= index < len(self.lines):
-            self._seek_to_line(self.lines[index])
-
-    async def _scroll_to_controller_selection(self, index: int) -> None:
-        if 0 <= index < len(self.line_scroll_keys):
-            await self.lyrics_column.scroll_to(
-                scroll_key=self.line_scroll_keys[index],
-                duration=250,
-            )

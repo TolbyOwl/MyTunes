@@ -618,15 +618,6 @@ class MusicView(ft.Container):
         self.sort_container.visible = False
         self._render_artist_page(artist_name)
 
-    def controller_back(self) -> bool:
-        if self.current_subview == "artist_detail":
-            self._switch_subview("artists")
-            return True
-        if self.current_subview == "album_detail":
-            self._switch_subview("albums")
-            return True
-        return False
-
     @staticmethod
     def _split_artist_credits(credit: str | None) -> list[str]:
         """Splits common multi-artist tag separators while preserving unspaced slashes."""

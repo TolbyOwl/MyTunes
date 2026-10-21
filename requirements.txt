@@ -4,7 +4,6 @@ mutagen>=1.47.0
 httpx>=0.28.0
 feedparser>=6.0.11
 pillow>=11.0.0
-pygame-ce>=2.5.8
 winrt-Windows.Foundation>=3.2.1,<3.3; platform_system == "Windows"
 winrt-Windows.Media>=3.2.1,<3.3; platform_system == "Windows"
 winrt-Windows.Media.Playback>=3.2.1,<3.3; platform_system == "Windows"

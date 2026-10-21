@@ -7,7 +7,6 @@ from mytunes.core.audio import AudioEngine
 from mytunes.core.queue import QueueManager, RepeatMode
 from mytunes.models.artist_credits import split_artist_credits
 from mytunes.ui.theme import MetroTheme
-from mytunes.ui.components.controller_hints import build_controller_hints
 import sqlite3
 
 class PlayerBar(ft.Container):
@@ -48,8 +47,6 @@ class PlayerBar(ft.Container):
         self.on_album_navigation = on_album_click
 
         self.is_dragging_slider = False
-        self._controller_mode = False
-        self._controller_visible_state: dict[str, bool] = {}
 
         # UI Controls
         # Placeholder disc — shown when no artwork is loaded
@@ -256,14 +253,20 @@ class PlayerBar(ft.Container):
         )
         self.controller_overlay = ft.Container(
             visible=False,
-            padding=ft.Padding.only(bottom=2),
-            alignment=ft.Alignment(1, 0),
-            content=ft.Row(
-                expand=True,
-                alignment=ft.MainAxisAlignment.END,
-                controls=[self.controller_hints],
-            ),
+            padding=ft.Padding.only(bottom=4),
+            content=self.controller_hints,
         )
+
+        self._controller_visible_state = {
+            "lyrics": True,
+            "speed": True,
+            "eq": True,
+            "sleep": True,
+            "queue": True,
+            "volume": True,
+            "volume_slider": True,
+            "fav": True,
+        }
 
         # Quick tools
         self.btn_sleep = ft.IconButton(
@@ -398,8 +401,8 @@ class PlayerBar(ft.Container):
         )
 
     def set_controller_mode(self, enabled: bool) -> None:
-        if enabled == self._controller_mode:
-            return
+        self.controller_overlay.visible = enabled
+        self.controller_hints.visible = enabled
         if enabled:
             self._controller_visible_state = {
                 "lyrics": self.btn_lyrics.visible,
@@ -410,13 +413,7 @@ class PlayerBar(ft.Container):
                 "volume": self.btn_volume.visible,
                 "volume_slider": self.volume_slider.visible,
                 "fav": self.fav_button.visible,
-                "shuffle": self.btn_shuffle.visible,
-                "repeat": self.btn_repeat.visible,
             }
-        self._controller_mode = enabled
-        self.controller_overlay.visible = enabled
-        self.controller_hints.visible = enabled
-        if enabled:
             self.btn_lyrics.visible = False
             self.btn_speed.visible = False
             self.btn_eq.visible = False
@@ -425,9 +422,6 @@ class PlayerBar(ft.Container):
             self.btn_volume.visible = False
             self.volume_slider.visible = False
             self.fav_button.visible = False
-            self.btn_shuffle.visible = False
-            self.btn_repeat.visible = False
-            self.height = 126
         else:
             self.btn_lyrics.visible = self._controller_visible_state.get("lyrics", True)
             self.btn_speed.visible = self._controller_visible_state.get("speed", True)
@@ -437,16 +431,18 @@ class PlayerBar(ft.Container):
             self.btn_volume.visible = self._controller_visible_state.get("volume", True)
             self.volume_slider.visible = self._controller_visible_state.get("volume_slider", True)
             self.fav_button.visible = self._controller_visible_state.get("fav", True)
-            self.btn_shuffle.visible = self._controller_visible_state.get("shuffle", True)
-            self.btn_repeat.visible = self._controller_visible_state.get("repeat", True)
-            self.height = 102
         safe_update(self)
 
     def set_controller_hints(self, hints: dict[str, str]) -> None:
-        self.controller_hints.controls = build_controller_hints(
-            hints,
-            self._mt.text_primary,
-        )
+        self.controller_hints.controls = [
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.WHITE),
+                content=ft.Text(f"{key}: {value}", size=10, color=self._mt.text_primary),
+            )
+            for key, value in hints.items()
+        ]
         self.controller_hints.visible = bool(hints)
         self.controller_overlay.visible = self.controller_overlay.visible or bool(hints)
         safe_update(self)
@@ -478,18 +474,10 @@ class PlayerBar(ft.Container):
 
             self.fav_button.icon = ft.Icons.FAVORITE_BORDER
             self.fav_button.icon_color = ft.Colors.GREY_400
-            self.scrubber_row.visible = True
-            self.btn_lyrics.visible = True
-            self.btn_speed.visible = False
-            self.btn_prev.visible = True
-            self.btn_next.visible = True
-            self.btn_shuffle.visible = True
-            self.btn_repeat.visible = True
             self.time_total.value = "0:00"
             self.progress_slider.value = 0.0
             self._mt.reset_dynamic_accent()
             self._apply_theme_colors()
-            self._refresh_controller_visibility()
             safe_update(self)
             return
 
@@ -550,45 +538,35 @@ class PlayerBar(ft.Container):
         # - Music / other: show lyrics button, hide speed button, show progress bar
         is_podcast = track.id.startswith("pod_")
 
-        self.scrubber_row.visible = not is_radio
-        self.btn_lyrics.visible = not (is_radio or is_podcast)
-        self.btn_speed.visible = is_podcast
-        self.btn_prev.visible = not is_radio
-        self.btn_next.visible = not is_radio
-        self.btn_shuffle.visible = not (is_radio or is_podcast)
-        self.btn_repeat.visible = not is_radio
-        self._refresh_controller_visibility()
+        if is_radio:
+            self.scrubber_row.visible = False
+            self.btn_lyrics.visible = False
+            self.btn_speed.visible = False
+            self.btn_prev.visible = False
+            self.btn_next.visible = False
+            self.btn_shuffle.visible = False
+            self.btn_repeat.visible = False
+        elif is_podcast:
+            self.scrubber_row.visible = True
+            self.btn_lyrics.visible = False
+            self.btn_speed.visible = True
+            self.btn_prev.visible = True
+            self.btn_next.visible = True
+            self.btn_shuffle.visible = False
+            self.btn_repeat.visible = True
+        else:
+            self.scrubber_row.visible = True
+            self.btn_lyrics.visible = True
+            self.btn_speed.visible = False
+            self.btn_prev.visible = True
+            self.btn_next.visible = True
+            self.btn_shuffle.visible = True
+            self.btn_repeat.visible = True
 
         self.time_total.value = track.formatted_duration
         self.progress_slider.max = track.duration if track.duration > 0 else 100.0
         self.progress_slider.value = 0.0
         safe_update(self)
-
-    def _refresh_controller_visibility(self) -> None:
-        if not self._controller_mode:
-            return
-
-        self._controller_visible_state.update(
-            {
-                "lyrics": self.btn_lyrics.visible,
-                "speed": self.btn_speed.visible,
-                "shuffle": self.btn_shuffle.visible,
-                "repeat": self.btn_repeat.visible,
-            }
-        )
-        for control in (
-            self.btn_lyrics,
-            self.btn_speed,
-            self.btn_eq,
-            self.btn_sleep,
-            self.btn_queue,
-            self.btn_volume,
-            self.volume_slider,
-            self.fav_button,
-            self.btn_shuffle,
-            self.btn_repeat,
-        ):
-            control.visible = False
 
     def _cycle_playback_speed(self, e) -> None:
         """Cycles through playback speed options: x1.0, x1.25, x1.5, x1.75, x2.0."""
