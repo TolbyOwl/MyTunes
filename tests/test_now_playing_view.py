@@ -102,6 +102,19 @@ class TestNowPlayingView(unittest.TestCase):
         self.assertEqual(self.view.time_total.value, "3:00")
         self.assertEqual(self.view.progress_slider.value, 65)
 
+    def test_position_updates_only_individual_progress_controls(self):
+        with patch("mytunes.ui.views.now_playing_view.safe_update") as update:
+            self.view.update_position(65, 180)
+
+        self.assertEqual(
+            update.call_args_list,
+            [
+                unittest.mock.call(self.view.time_current),
+                unittest.mock.call(self.view.time_total),
+                unittest.mock.call(self.view.progress_slider),
+            ],
+        )
+
     def test_artist_and_album_buttons_navigate_to_current_track(self):
         track = Track(
             id="track-1",

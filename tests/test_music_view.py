@@ -28,6 +28,24 @@ class TestMusicSongList(unittest.TestCase):
         )
         return view, play_track
 
+    def test_initial_tracks_skip_a_second_library_read(self):
+        tracks = [Track(id="a", title="Apple")]
+        provider = Mock()
+        provider.conn = MagicMock()
+
+        view = MusicView(
+            MagicMock(),
+            provider,
+            MetroTheme(),
+            Mock(),
+            Mock(),
+            Mock(),
+            initial_tracks=tracks,
+        )
+
+        provider.get_all_tracks.assert_not_called()
+        self.assertIs(view.all_tracks, tracks)
+
     def test_alphabetical_song_list_groups_letters_digits_and_other_scripts(self):
         tracks = [
             Track(id="z", title="Zebra"),
@@ -91,6 +109,45 @@ class TestMusicSongList(unittest.TestCase):
         self.assertTrue(view.songs_list.build_controls_on_demand)
         self.assertEqual(view.songs_list.scroll, ft.ScrollMode.AUTO)
 
+    def test_large_library_renders_and_scrolls_in_windows_for_each_sort(self):
+        tracks = [
+            Track(id=str(index), title=f"Song {index:04d}")
+            for index in range(1000)
+        ]
+
+        for sort_order in ("alpha_asc", "date_desc"):
+            with self.subTest(sort_order=sort_order):
+                view, _ = self._create_view(tracks)
+                if sort_order != "alpha_asc":
+                    view.current_sort = sort_order
+                    view._filter_and_render()
+
+                def rendered_track_count():
+                    return sum(
+                        callable(getattr(control, "on_click", None))
+                        for control in view.songs_list.controls
+                    )
+
+                self.assertEqual(rendered_track_count(), view._song_window_size)
+                view.songs_list.max_scroll_extent = 100
+
+                view.songs_list.on_scroll(
+                    ft.OnScrollEvent(
+                        name="scroll",
+                        control=view.songs_list,
+                        event_type=ft.ScrollType.UPDATE,
+                        pixels=50,
+                        min_scroll_extent=0,
+                        max_scroll_extent=100,
+                        viewport_dimension=50,
+                    )
+                )
+
+                self.assertGreater(view._song_window_start, 0)
+                self.assertEqual(rendered_track_count(), view._song_window_size)
+                self.assertGreater(view.songs_list.controls[1].height, 0)
+                self.assertGreater(view.songs_list.controls[-1].height, 0)
+
     def test_direct_letter_selection_jumps_to_selected_group(self):
         view, _ = self._create_view([
             Track(id="a", title="Apple"),
@@ -131,6 +188,7 @@ class TestMusicSongList(unittest.TestCase):
         view, play_track = self._create_view(tracks)
         row = view._build_track_row(tracks[1], tracks, 1)
 
+        self.assertEqual(row.on_click.__defaults__, (tracks[1], 1))
         row.on_click(None)
 
         play_track.assert_called_once_with(tracks[1], tracks, 1)

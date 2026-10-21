@@ -63,6 +63,31 @@ class TestWindowsMediaControls(unittest.TestCase):
             media_controls._update_artwork, 1, track
         )
 
+    def test_throttles_windows_timeline_updates_during_playback(self):
+        media_controls = object.__new__(WindowsMediaControls)
+        media_controls._controls = Mock()
+        media_controls._timeline_properties = Mock(
+            side_effect=lambda: SimpleNamespace()
+        )
+
+        with patch(
+            "mytunes.core.windows_media_controls.time.monotonic",
+            side_effect=[10.0, 11.0, 14.0, 15.0],
+        ):
+            media_controls.update_position(0.0, 180.0)
+            media_controls.update_position(1.0, 180.0)
+            media_controls.update_position(4.0, 180.0)
+            media_controls.update_position(5.0, 180.0)
+
+        self.assertEqual(
+            media_controls._controls.update_timeline_properties.call_count,
+            2,
+        )
+        self.assertEqual(
+            media_controls._last_timeline_position,
+            5.0,
+        )
+
     def test_routes_transport_buttons_to_shared_dispatcher(self):
         media_controls = object.__new__(WindowsMediaControls)
         media_controls.actions = Mock()

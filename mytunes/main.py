@@ -1,4 +1,5 @@
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
 import ctypes
@@ -118,8 +119,20 @@ class XInputController:
         self._xinput = self._load_xinput()
         self._dinput_joystick = None
         self._pygame_ready = False
+        self._poll_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="mytunes-gamepad",
+        )
+        self._poll_task = self.page.run_task(self._poll_loop)
 
-        self.page.run_task(self._poll_loop)
+    def close(self) -> None:
+        """Stop gamepad polling and release its dedicated worker."""
+        poll_task = getattr(self, "_poll_task", None)
+        if poll_task is not None:
+            poll_task.cancel()
+        executor = getattr(self, "_poll_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _load_xinput():
@@ -195,9 +208,11 @@ class XInputController:
 
     async def _poll_loop(self):
         while True:
-            gamepad_state = self._read_xinput_state()
-            if gamepad_state is None:
-                gamepad_state = self._read_dinput_state()
+            loop = asyncio.get_running_loop()
+            gamepad_state = await loop.run_in_executor(
+                self._poll_executor,
+                self._read_controller_state,
+            )
             if gamepad_state is None:
                 if self.connected:
                     self._set_connected(False)
@@ -212,6 +227,14 @@ class XInputController:
             self._handle_analog(left_x, left_y, right_x, right_y)
             self._handle_triggers(left_trigger, right_trigger)
             await asyncio.sleep(self._CONNECTED_POLL_INTERVAL)
+
+    def _read_controller_state(
+        self,
+    ) -> Optional[tuple[int, float, float, float, float, int, int]]:
+        gamepad_state = self._read_xinput_state()
+        if gamepad_state is None:
+            return self._read_dinput_state()
+        return gamepad_state
 
     def _read_xinput_state(self) -> Optional[tuple[int, float, float, float, float, int, int]]:
         if self._xinput is None:
@@ -1033,7 +1056,8 @@ def main(page: ft.Page) -> None:
     local_provider = LocalProvider(db_conn)
     sync_manager = SyncManager(db_conn)
     playback_session = PlaybackSessionStore(db_conn)
-    saved_session = playback_session.load(local_provider.get_all_tracks())
+    library_tracks = local_provider.get_all_tracks()
+    saved_session = playback_session.load(library_tracks)
 
     # 2. Theme & Design
     theme = MetroTheme(is_dark=True, default_accent="#0078D7")
@@ -1070,6 +1094,8 @@ def main(page: ft.Page) -> None:
     def close_app(_event) -> None:
         persist_playback_session(force_position=True)
         media_controls.close()
+        if controller_manager is not None:
+            controller_manager.close()
 
     page.on_close = close_app
 
@@ -1126,14 +1152,14 @@ def main(page: ft.Page) -> None:
 
     # Forward declaration for UI callbacks
     def on_track_changed(track: Track | None) -> None:
-        player_bar.update_track(track, update_ui=False)
-        now_playing_view.update_track(track, update_ui=False)
         media_controls.update_track(track)
         if track and lyrics_active:
             lyrics_view.load_for_track(track)
         if pivot_nav is not None and pivot_nav.active_index == 0:
+            now_playing_view.update_track(track, update_ui=False)
             safe_update(now_playing_view)
         else:
+            player_bar.update_track(track, update_ui=False)
             safe_update(player_bar)
 
     queue_manager.on_track_changed = on_track_changed
@@ -1185,6 +1211,7 @@ def main(page: ft.Page) -> None:
     audio_engine.on_stopped = media_controls.update_playback_stopped
     audio_engine.on_volume_changed = on_volume_changed
     audio_engine.on_position_changed = on_position_changed
+    audio_engine.on_playback_error = lambda message: show_snackbar(page, message)
     audio_engine.on_seeked = on_seeked
 
     audio_engine.on_sleep_triggered = lambda: (
@@ -1197,6 +1224,23 @@ def main(page: ft.Page) -> None:
         current_list: list[Track],
         start_index: int | None = None,
     ) -> None:
+        try:
+            page.run_task(
+                play_track_async,
+                track,
+                current_list,
+                start_index,
+            )
+        except Exception:
+            logger.exception("Could not schedule playback for track %r", track.id)
+            show_snackbar(page, "Could not start playback.")
+
+    async def play_track_async(
+        track: Track,
+        current_list: list[Track],
+        start_index: int | None,
+    ) -> None:
+        await asyncio.sleep(0)
         if (
             start_index is None
             or not 0 <= start_index < len(current_list)
@@ -1458,7 +1502,15 @@ def main(page: ft.Page) -> None:
         page.update()
 
     # 6. Instantiate Views
-    view_music = MusicView(page, local_provider, theme, play_track, play_next, add_to_queue)
+    view_music = MusicView(
+        page,
+        local_provider,
+        theme,
+        play_track,
+        play_next,
+        add_to_queue,
+        initial_tracks=library_tracks,
+    )
     cloud_settings = CloudView(page, theme, sync_manager, embedded=True)
     view_podcasts = PodcastsView(
         page,
@@ -1508,6 +1560,10 @@ def main(page: ft.Page) -> None:
         if index == 4:
             view_playlists.ensure_loaded()
         if index == 0:
+            now_playing_view.update_track(
+                queue_manager.current_track,
+                update_ui=False,
+            )
             now_playing_view.update_playback_state(audio_engine.is_playing)
             now_playing_view.update_position(
                 audio_engine.current_position,
@@ -1518,6 +1574,10 @@ def main(page: ft.Page) -> None:
                 audio_engine.is_muted,
             )
         else:
+            player_bar.update_track(
+                queue_manager.current_track,
+                update_ui=False,
+            )
             player_bar.update_playback_state(audio_engine.is_playing)
             player_bar.update_position(
                 audio_engine.current_position,

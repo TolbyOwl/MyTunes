@@ -1,7 +1,13 @@
 import asyncio
+import threading
 import unittest
 from unittest.mock import MagicMock, Mock
-from mytunes.core.audio import SleepTimerState, AudioEngine
+from unittest.mock import AsyncMock, patch
+from mytunes.core.audio import (
+    POSITION_POLL_INTERVAL_SECONDS,
+    SleepTimerState,
+    AudioEngine,
+)
 from mytunes.core.queue import QueueManager
 from mytunes.models.track import Track
 
@@ -91,8 +97,100 @@ class TestSleepTimer(unittest.TestCase):
         engine.play_track(Track(id="track", title="Song", file_path="song.mp3"))
 
         state_changed.assert_called_once_with(True)
-        page.run_task.assert_called_once_with(engine._poll_position)
+        page.run_task.assert_called_once_with(
+            engine._start_audio,
+            engine._playback_generation,
+            "song.mp3",
+            False,
+        )
         page.update.assert_not_called()
+
+    def test_restored_track_is_loaded_paused_before_seeking(self):
+        page = MagicMock()
+        engine = AudioEngine(page, QueueManager())
+        engine.audio = MagicMock()
+        track = Track(id="track", title="Song", file_path="song.mp3")
+
+        engine.restore_paused_track(track, 12.0)
+
+        self.assertFalse(engine.is_playing)
+        page.run_task.assert_any_call(
+            engine._start_audio,
+            engine._playback_generation,
+            "song.mp3",
+            True,
+        )
+        engine.audio.pause.assert_not_called()
+
+    def test_audio_start_runs_in_worker_before_position_polling(self):
+        engine = AudioEngine(MagicMock(), QueueManager())
+        engine.audio = MagicMock()
+        engine.is_playing = True
+        engine._playback_generation = 1
+        engine._start_poll = Mock()
+
+        asyncio.run(engine._start_audio(1, "song.mp3"))
+
+        engine.audio.play.assert_called_once_with()
+        engine._start_poll.assert_called_once_with()
+
+    def test_audio_start_failure_stops_playback_and_notifies_user(self):
+        engine = AudioEngine(MagicMock(), QueueManager())
+        engine.audio = MagicMock()
+        engine.audio.play.side_effect = RuntimeError("VLC startup failed")
+        engine.is_playing = True
+        engine._playback_generation = 1
+        engine._stop_poll = Mock()
+        engine._start_poll = Mock()
+        state_changed = Mock()
+        playback_error = Mock()
+        engine.on_state_changed = state_changed
+        engine.on_playback_error = playback_error
+
+        with self.assertLogs("mytunes.core.audio", level="ERROR"):
+            asyncio.run(engine._start_audio(1, "song.mp3"))
+
+        self.assertFalse(engine.is_playing)
+        engine._stop_poll.assert_called_once_with()
+        engine._start_poll.assert_not_called()
+        state_changed.assert_called_once_with(False)
+        playback_error.assert_called_once()
+
+    def test_position_poll_is_half_second_and_reads_vlc_off_event_loop(self):
+        engine = AudioEngine(MagicMock(), QueueManager())
+        engine.audio = MagicMock()
+        engine.audio.get_duration.return_value = 180.0
+        engine.is_playing = True
+        owner_thread = threading.get_ident()
+        reader_threads = []
+        position_values = iter([1.2, 1.8, 2.1])
+
+        def read_position():
+            reader_threads.append(threading.get_ident())
+            return next(position_values)
+
+        engine.audio.get_position.side_effect = read_position
+        position_updates = []
+
+        def on_position_changed(position, duration):
+            position_updates.append((position, duration))
+            if position >= 2:
+                engine.is_playing = False
+
+        engine.on_position_changed = on_position_changed
+        with patch(
+            "mytunes.core.audio.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            asyncio.run(engine._poll_position())
+
+        self.assertEqual(POSITION_POLL_INTERVAL_SECONDS, 0.5)
+        self.assertEqual(
+            position_updates,
+            [(1.2, 180.0), (2.1, 180.0)],
+        )
+        self.assertEqual(sleep.await_args_list[0].args, (0.5,))
+        self.assertTrue(all(thread_id != owner_thread for thread_id in reader_threads))
 
 if __name__ == "__main__":
     unittest.main()

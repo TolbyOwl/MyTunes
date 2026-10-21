@@ -24,6 +24,8 @@ from mytunes.ui.theme import MetroTheme
 import threading
 
 logger = logging.getLogger(__name__)
+SONG_ROW_HEIGHT = 52
+SONG_GROUP_HEADER_HEIGHT = 40
 
 
 class MusicView(ft.Container):
@@ -41,6 +43,7 @@ class MusicView(ft.Container):
         on_play_track: Callable[[Track, List[Track], Optional[int]], None],
         on_play_next: Callable[[Track], None],
         on_add_queue: Callable[[Track], None],
+        initial_tracks: Optional[List[Track]] = None,
     ):
         super().__init__()
         self.app_page = page
@@ -50,10 +53,13 @@ class MusicView(ft.Container):
         self.on_play_next = on_play_next
         self.on_add_queue = on_add_queue
 
-        self.all_tracks: List[Track] = []
+        self.all_tracks: List[Track] = initial_tracks if initial_tracks is not None else []
         self.displayed_tracks: List[Track] = []
+        self._active_playback_tracks: List[Track] = []
         self._song_window_size = 200
         self._song_window_start = 0
+        self._song_group_starts: Dict[str, int] = {}
+        self._song_render_indices: List[int] = []
         self._search_generation = 0
         self._songs_render_cache_key: Optional[tuple] = None
         self._songs_render_cache_content: Optional[ft.Control] = None
@@ -68,7 +74,10 @@ class MusicView(ft.Container):
         self.padding = ft.Padding.all(24)
 
         self._build_view()
-        self.load_tracks()
+        if initial_tracks is None:
+            self.load_tracks()
+        else:
+            self._filter_and_render()
 
     def _build_view(self) -> None:
         # Search Field
@@ -239,6 +248,7 @@ class MusicView(ft.Container):
             return
 
         self._song_window_start = 0
+        self._active_playback_tracks = tracks
         alpha_sorted = self.current_sort in {"alpha_asc", "alpha_desc"}
         self._song_group_keys: Dict[str, ft.ScrollKey] = {}
         self.song_index_buttons: Dict[str, ft.Control] = {}
@@ -287,48 +297,32 @@ class MusicView(ft.Container):
                 content=ft.OutlinedButton(
                     "Play all on shuffle",
                     icon=ft.Icons.SHUFFLE,
-                    on_click=lambda e, song_tracks=list(tracks): self._play_songs_random(song_tracks),
+                    on_click=lambda e: self._play_active_songs_random(),
                 ),
             )
         )
 
         if alpha_sorted:
-            grouped_tracks: Dict[str, List[tuple[int, Track]]] = {}
+            grouped_indices: Dict[str, List[int]] = {}
             for index, track in enumerate(tracks):
                 group = self._track_index_group(track)
-                grouped_tracks.setdefault(group, []).append((index, track))
-
+                grouped_indices.setdefault(group, []).append(index)
             letter_order = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             if self.current_sort == "alpha_desc":
                 letter_order.reverse()
             group_order = ["#", *letter_order, "~"]
+            self._song_group_starts = {}
+            self._song_render_indices = []
+            for group in group_order:
+                group_indices = grouped_indices.get(group)
+                if group_indices:
+                    self._song_group_starts[group] = len(self._song_render_indices)
+                    self._song_render_indices.extend(group_indices)
             self._song_group_keys = {
                 group: ft.ScrollKey(f"songs-index-{group}")
-                for group in grouped_tracks
+                for group in group_order
+                if group in self._song_group_starts
             }
-            visible_rows = []
-            for group in group_order:
-                group_tracks = grouped_tracks.get(group)
-                if not group_tracks:
-                    continue
-                visible_rows.append(
-                    ft.Container(
-                        key=self._song_group_keys[group],
-                        padding=ft.Padding.only(top=12, bottom=4),
-                        content=ft.Text(
-                            group,
-                            size=18,
-                            weight=ft.FontWeight.W_800,
-                            color=self._mt.current_accent,
-                        ),
-                    )
-                )
-                visible_rows.extend(
-                    self._build_track_row(track, tracks, index)
-                    for index, track in group_tracks
-                )
-
-            songs_list.controls.extend(visible_rows)
             self.content_area.content = ft.Row(
                 expand=True,
                 spacing=8,
@@ -340,15 +334,13 @@ class MusicView(ft.Container):
             )
         else:
             self._song_group_keys = {}
-            songs_list.controls.extend(
-                self._build_track_row(track, tracks, index)
-                for index, track in enumerate(tracks[: self._song_window_size])
-            )
+            self._song_group_starts = {}
+            self._song_render_indices = []
             self.content_area.content = songs_list
 
         self._songs_render_cache_key = cache_key
         self._songs_render_cache_content = self.content_area.content
-        safe_update(self)
+        self._render_songs_window()
 
     def _build_song_letter_rail(self, group_order: List[str]) -> ft.Control:
         self.song_index_buttons = {}
@@ -408,6 +400,8 @@ class MusicView(ft.Container):
             or group not in self._song_group_keys
         ):
             return
+        self._song_window_start = self._song_group_starts[group]
+        self._render_songs_window()
         await self.songs_list.scroll_to(
             scroll_key=str(self._song_group_keys[group]),
             duration=280,
@@ -415,18 +409,18 @@ class MusicView(ft.Container):
         )
 
     def _on_song_list_scroll(self, event: ft.OnScrollEvent) -> None:
-        if self.current_sort in {"alpha_asc", "alpha_desc"}:
-            return
         if not self.displayed_tracks or not self.songs_list:
             return
         max_scroll = getattr(self.songs_list, "max_scroll_extent", 0)
         if max_scroll <= 0:
             return
         scroll_ratio = float(event.pixels) / max_scroll if max_scroll else 0.0
-        visible_count = max(1, self._song_window_size)
+        max_start = max(0, len(self.displayed_tracks) - self._song_window_size)
+        window_step = max(1, self._song_window_size // 2)
+        estimated_start = round(scroll_ratio * max_start)
         start_index = min(
-            len(self.displayed_tracks) - visible_count,
-            max(0, int(scroll_ratio * max(0, len(self.displayed_tracks) - visible_count))),
+            max_start,
+            max(0, round(estimated_start / window_step) * window_step),
         )
         if start_index == self._song_window_start:
             return
@@ -435,25 +429,83 @@ class MusicView(ft.Container):
         self._render_songs_window()
 
     def _render_songs_window(self) -> None:
-        if self.current_sort in {"alpha_asc", "alpha_desc"} or not self.displayed_tracks:
+        if not self.displayed_tracks:
             return
 
-        end_index = min(len(self.displayed_tracks), self._song_window_start + self._song_window_size)
-        visible_tracks = self.displayed_tracks[self._song_window_start:end_index]
+        tracks = self.displayed_tracks
+        start_index = min(
+            self._song_window_start,
+            max(0, len(tracks) - self._song_window_size),
+        )
+        end_index = min(len(tracks), start_index + self._song_window_size)
+        alpha_sorted = self.current_sort in {"alpha_asc", "alpha_desc"}
+        visible_indices = (
+            self._song_render_indices[start_index:end_index]
+            if alpha_sorted
+            else range(start_index, end_index)
+        )
         controls: List[ft.Control] = [
             ft.Container(
                 padding=ft.Padding.only(bottom=8),
                 content=ft.OutlinedButton(
                     "Play all on shuffle",
                     icon=ft.Icons.SHUFFLE,
-                    on_click=lambda e, song_tracks=list(self.displayed_tracks): self._play_songs_random(song_tracks),
+                    on_click=lambda e: self._play_active_songs_random(),
                 ),
             )
         ]
-        controls.extend(
-            self._build_track_row(track, self.displayed_tracks, self._song_window_start + index)
-            for index, track in enumerate(visible_tracks)
-        )
+        if alpha_sorted and start_index > 0:
+            preceding_groups = sum(
+                group_start < start_index
+                for group_start in self._song_group_starts.values()
+            )
+            controls.append(
+                ft.Container(
+                    height=(
+                        start_index * SONG_ROW_HEIGHT
+                        + preceding_groups * SONG_GROUP_HEADER_HEIGHT
+                    ),
+                )
+            )
+
+        self._active_playback_tracks = tracks
+        for render_index, index in enumerate(visible_indices, start=start_index):
+            track = tracks[index]
+            if (
+                alpha_sorted
+                and self._song_group_starts.get(self._track_index_group(track))
+                == render_index
+            ):
+                group = self._track_index_group(track)
+                controls.append(
+                    ft.Container(
+                        key=self._song_group_keys[group],
+                        height=SONG_GROUP_HEADER_HEIGHT,
+                        padding=ft.Padding.only(top=12, bottom=4),
+                        content=ft.Text(
+                            group,
+                            size=18,
+                            weight=ft.FontWeight.W_800,
+                            color=self._mt.current_accent,
+                        ),
+                    )
+                )
+            controls.append(self._build_track_row(track, tracks, index))
+
+        remaining_tracks = len(tracks) - end_index
+        if remaining_tracks > 0:
+            remaining_groups = sum(
+                group_start >= end_index
+                for group_start in self._song_group_starts.values()
+            )
+            controls.append(
+                ft.Container(
+                    height=(
+                        remaining_tracks * SONG_ROW_HEIGHT
+                        + remaining_groups * SONG_GROUP_HEADER_HEIGHT
+                    ),
+                )
+            )
 
         self.songs_list.controls = controls
         safe_update(self)
@@ -1046,6 +1098,7 @@ class MusicView(ft.Container):
             artist_tracks,
             key=lambda t: (t.album or "", t.disc_number or 1, t.track_number or 999, t.title)
         )
+        self._active_playback_tracks = artist_tracks_sorted
         song_rows = []
         for idx, t in enumerate(artist_tracks_sorted, 1):
             song_num = ft.Container(
@@ -1079,8 +1132,8 @@ class MusicView(ft.Container):
                 padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                 border_radius=4,
                 ink=True,
-                on_click=lambda e, tr=t, trks=artist_tracks_sorted, i=idx - 1: (
-                    self.on_play_track(tr, trks, i)
+                on_click=lambda e, tr=t, i=idx - 1: (
+                    self._play_track_from_active_list(tr, i)
                 ),
                 content=ft.Row(
                     spacing=12,
@@ -1137,6 +1190,7 @@ class MusicView(ft.Container):
             album_tracks,
             key=lambda t: (t.disc_number or 1, t.track_number or 999, t.title)
         )
+        self._active_playback_tracks = album_tracks_sorted
 
         # Primary album metadata
         first_t = album_tracks_sorted[0]
@@ -1368,8 +1422,8 @@ class MusicView(ft.Container):
                     border_radius=4,
                     ink=True,
                     # Tapping any song plays from that song with the entire album treated as a single list
-                    on_click=lambda e, tr=t, trks=album_tracks_sorted, i=album_track_indices[t.id]: (
-                        self.on_play_track(tr, trks, i)
+                    on_click=lambda e, tr=t, i=album_track_indices[t.id]: (
+                        self._play_track_from_active_list(tr, i)
                     ),
                     content=ft.Row(
                         spacing=12,
@@ -1485,6 +1539,16 @@ class MusicView(ft.Container):
             self.on_play_track(shuffled[0], shuffled, 0)
             show_snackbar(self.app_page, f"Playing album on random ({len(shuffled)} songs)")
 
+    def _play_track_from_active_list(
+        self,
+        track: Track,
+        start_index: Optional[int],
+    ) -> None:
+        self.on_play_track(track, self._active_playback_tracks, start_index)
+
+    def _play_active_songs_random(self) -> None:
+        self._play_songs_random(self._active_playback_tracks)
+
     def _build_track_row(
         self,
         track: Track,
@@ -1492,6 +1556,7 @@ class MusicView(ft.Container):
         start_index: Optional[int] = None,
     ) -> ft.Container:
         playback_tracks = tracks if tracks is not None else self.displayed_tracks
+        self._active_playback_tracks = playback_tracks
 
         artwork_placeholder = ft.Container(
             width=40,
@@ -1548,11 +1613,12 @@ class MusicView(ft.Container):
         )
 
         return ft.Container(
+            height=SONG_ROW_HEIGHT,
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             border_radius=4,
             ink=True,
-            on_click=lambda e, tr=track, trks=playback_tracks, i=start_index: (
-                self.on_play_track(tr, trks, i)
+            on_click=lambda e, tr=track, i=start_index: (
+                self._play_track_from_active_list(tr, i)
             ),
             content=ft.Row(
                 spacing=12,

@@ -1,4 +1,6 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -37,6 +39,15 @@ class TestControllerNavigation(unittest.TestCase):
         controller._axis_repeat_at = {}
         controller._axis_held_since = {}
         controller._stick_dead_zone = 0.35
+        controller._poll_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="test-gamepad",
+        )
+        self.addCleanup(
+            controller._poll_executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
         controller._left_trigger_pressed = False
         controller._right_trigger_pressed = False
         controller.connected = False
@@ -210,6 +221,44 @@ class TestControllerNavigation(unittest.TestCase):
 
         controller._read_dinput_state.assert_not_called()
         sleep.assert_called_once_with(0.05)
+
+    def test_gamepad_reads_run_off_the_page_event_loop(self):
+        controller = self.make_controller()
+        event_loop_thread = None
+        reader_threads = []
+        controller._read_controller_state = lambda: (
+            reader_threads.append(threading.get_ident()) or None
+        )
+        sleep = Mock(side_effect=asyncio.CancelledError)
+
+        async def run_once():
+            nonlocal event_loop_thread
+            event_loop_thread = threading.get_ident()
+            with patch("mytunes.main.asyncio.sleep", sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await controller._poll_loop()
+
+        asyncio.run(run_once())
+
+        self.assertEqual(len(reader_threads), 1)
+        self.assertNotEqual(reader_threads[0], event_loop_thread)
+        sleep.assert_called_once_with(0.25)
+
+    def test_gamepad_state_prefers_xinput_then_falls_back_to_dinput(self):
+        controller = self.make_controller()
+        xinput_state = (1, 0.0, 0.0, 0.0, 0.0, 0, 0)
+        controller._read_xinput_state = Mock(return_value=xinput_state)
+        controller._read_dinput_state = Mock()
+
+        self.assertEqual(controller._read_controller_state(), xinput_state)
+        controller._read_dinput_state.assert_not_called()
+
+        controller._read_xinput_state.return_value = None
+        dinput_state = (2, 0.1, 0.2, 0.3, 0.4, 5, 6)
+        controller._read_dinput_state.return_value = dinput_state
+
+        self.assertEqual(controller._read_controller_state(), dinput_state)
+        controller._read_dinput_state.assert_called_once_with()
 
     def test_header_shows_shoulder_badges_in_controller_mode(self):
         nav = PivotNav(

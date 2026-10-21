@@ -132,6 +132,21 @@ class TestPlayerBarNavigation(unittest.TestCase):
         update.assert_not_called()
         self.assertIsNone(theme.dynamic_accent)
 
+    def test_position_updates_only_individual_progress_controls(self):
+        player = self._create_player()
+
+        with patch("mytunes.ui.components.player_bar.safe_update") as update:
+            player.update_position(65, 180)
+
+        self.assertEqual(
+            update.call_args_list,
+            [
+                unittest.mock.call(player.time_current),
+                unittest.mock.call(player.time_total),
+                unittest.mock.call(player.progress_slider),
+            ],
+        )
+
     def test_artist_and_album_buttons_forward_current_track(self):
         queue = QueueManager()
         track = Track(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -12,6 +13,7 @@ from mytunes.core.media_control_actions import MediaControlActions
 from mytunes.models.track import Track
 
 logger = logging.getLogger(__name__)
+TIMELINE_UPDATE_INTERVAL_SECONDS = 5.0
 
 
 class WindowsMediaControls:
@@ -39,6 +41,8 @@ class WindowsMediaControls:
         self._playback_type: Any = None
         self._timeline_properties: Any = None
         self._button_pressed_token: Any = None
+        self._last_timeline_update_at: float | None = None
+        self._last_timeline_position = 0.0
 
         if sys.platform != "win32":
             return
@@ -90,6 +94,8 @@ class WindowsMediaControls:
 
         self._track_generation += 1
         generation = self._track_generation
+        self._last_timeline_update_at = None
+        self._last_timeline_position = 0.0
         try:
             if track is None:
                 self._display_updater.clear_all()
@@ -166,6 +172,17 @@ class WindowsMediaControls:
         try:
             duration = max(0.0, total_seconds)
             position = min(max(0.0, current_seconds), duration)
+            now = time.monotonic()
+            last_update_at = getattr(self, "_last_timeline_update_at", None)
+            last_position = getattr(self, "_last_timeline_position", 0.0)
+            if (
+                last_update_at is not None
+                and now - last_update_at < TIMELINE_UPDATE_INTERVAL_SECONDS
+                and abs(position - last_position)
+                < TIMELINE_UPDATE_INTERVAL_SECONDS
+            ):
+                return
+
             timeline = self._timeline_properties()
             timeline.start_time = timedelta(0)
             timeline.end_time = timedelta(seconds=duration)
@@ -173,6 +190,8 @@ class WindowsMediaControls:
             timeline.max_seek_time = timedelta(seconds=duration)
             timeline.position = timedelta(seconds=position)
             self._controls.update_timeline_properties(timeline)
+            self._last_timeline_update_at = now
+            self._last_timeline_position = position
         except Exception:
             logger.exception("Failed to update Windows media timeline.")
 

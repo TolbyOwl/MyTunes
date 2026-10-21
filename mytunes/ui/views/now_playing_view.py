@@ -717,13 +717,15 @@ class NowPlayingView(ft.Container):
         if self._is_dragging:
             return
         self.time_current.value = self._format_time(current_seconds)
+        safe_update(self.time_current)
         if total_seconds > 0:
             self.progress_slider.max = total_seconds
             self.time_total.value = self._format_time(total_seconds)
+            safe_update(self.time_total)
             self._is_seekable = not self._is_radio
             self.progress_slider.disabled = not self._is_seekable
         self.progress_slider.value = min(current_seconds, self.progress_slider.max)
-        safe_update(self)
+        safe_update(self.progress_slider)
 
     def _set_artwork(self, source: Optional[str]) -> None:
         self.album_image.src = source or ""
