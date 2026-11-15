@@ -966,10 +966,13 @@ class MusicView(ft.Container):
                     # Strip the Read more phrase from body text; button handles the link
                     clean = _strip_bio(bio_content)
                     bio_text.value = clean if clean else bio_content
-                    # Show/update Read more button
-                    lfm_url = fetched_url or f"https://www.last.fm/music/{urllib.parse.quote(artist_name)}"
-                    _lastfm_url_holder["url"] = lfm_url
-                    read_more_btn.visible = True
+                    # Show/update Read more button if a Last.fm link is available
+                    if fetched_url or "Read more on Last.fm" in bio_content:
+                        lfm_url = fetched_url or f"https://www.last.fm/music/{urllib.parse.quote(artist_name)}"
+                        _lastfm_url_holder["url"] = lfm_url
+                        read_more_btn.visible = True
+                    else:
+                        read_more_btn.visible = False
                     updated = True
                 elif not display_bio:
                     bio_text.value = f"No biography found for {artist_name}."

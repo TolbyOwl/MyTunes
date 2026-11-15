@@ -14,9 +14,13 @@ import ssl
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from typing import Optional, Dict
 
-LASTFM_API_KEY = "9517950dfe325f4fc952d19c1ddf65b4"
+# Optional Last.fm API key for artist biographies.
+# Left empty by default so no keys are committed publicly.
+# When empty or disabled, MyTunes automatically uses Wikipedia for biographies.
+LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "").strip()
 
 class ArtistMetadataProvider:
     """
@@ -132,28 +136,35 @@ class ArtistMetadataProvider:
         except Exception:
             pass
 
-        # 2. Fetch bio from Last.fm API
+        # 2. Fetch bio from Last.fm API (only if a valid key is configured)
         bio = ""
-        try:
-            q = urllib.parse.quote(artist_name)
-            api_endpoint = f"http://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist={q}&api_key={LASTFM_API_KEY}&format=json"
-            req = urllib.request.Request(api_endpoint, headers={"User-Agent": "MyTunes/1.0"})
-            with urllib.request.urlopen(req, context=self._ssl_ctx, timeout=5) as res:
-                data = json.loads(res.read().decode("utf-8"))
-                artist_data = data.get("artist", {})
-                lastfm_url = artist_data.get("url")
-                raw_bio = artist_data.get("bio", {}).get("content") or artist_data.get("bio", {}).get("summary") or ""
-                if raw_bio:
-                    # Clean out legal license boilerplate while preserving the text and Read more on Last.fm
-                    clean_bio = re.sub(r'User-contributed text is available under the Creative Commons By-SA License;.*$', '', raw_bio, flags=re.IGNORECASE).strip()
-                    # Strip any HTML formatting tags, preserving text
-                    clean_bio = re.sub(r'<[^>]+>', '', clean_bio).strip()
-                    # Ensure "Read more on Last.fm" is present at the end
-                    if "Read more on Last.fm" not in clean_bio:
-                        clean_bio = clean_bio.rstrip(".") + ". Read more on Last.fm."
-                    bio = clean_bio
-        except Exception:
-            pass
+        lastfm_key = (LASTFM_API_KEY or "").strip()
+        if lastfm_key:
+            try:
+                q = urllib.parse.quote(artist_name)
+                api_endpoint = f"http://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist={q}&api_key={lastfm_key}&format=json"
+                req = urllib.request.Request(api_endpoint, headers={"User-Agent": "MyTunes/1.0"})
+                with urllib.request.urlopen(req, context=self._ssl_ctx, timeout=5) as res:
+                    data = json.loads(res.read().decode("utf-8"))
+                    # If the key is invalid, revoked, or returns an error, safely skip
+                    if "error" not in data:
+                        artist_data = data.get("artist", {})
+                        lastfm_url = artist_data.get("url")
+                        raw_bio = artist_data.get("bio", {}).get("content") or artist_data.get("bio", {}).get("summary") or ""
+                        if raw_bio:
+                            # Clean out legal license boilerplate while preserving the text and Read more on Last.fm
+                            clean_bio = re.sub(r'User-contributed text is available under the Creative Commons By-SA License;.*$', '', raw_bio, flags=re.IGNORECASE).strip()
+                            # Strip any HTML formatting tags, preserving text
+                            clean_bio = re.sub(r'<[^>]+>', '', clean_bio).strip()
+                            # Ensure "Read more on Last.fm" is present at the end
+                            if "Read more on Last.fm" not in clean_bio:
+                                clean_bio = clean_bio.rstrip(".") + ". Read more on Last.fm."
+                            bio = clean_bio
+            except urllib.error.HTTPError:
+                # Catch 401/403/404 if key is revoked, invalid, or rate-limited
+                pass
+            except Exception:
+                pass
 
         # 3. Fallback to Wikipedia API if Last.fm returned no bio
         if not bio:
